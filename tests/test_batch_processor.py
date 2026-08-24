@@ -54,6 +54,7 @@ def make_config(*, overwrite_existing: bool = False) -> AppConfig:
         azure_foundry_api_key="test",
         azure_foundry_model_deployment="gpt-5.6-luna",
         azure_foundry_reasoning_effort="none",
+        web_search_context_size="default",
         search_audit_enabled=False,
         max_workers=2,
         request_timeout=90,

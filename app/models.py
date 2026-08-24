@@ -89,6 +89,10 @@ class CompanyResult(BaseModel):
     model_deployment: str = ""
     model_snapshot: str = ""
     response_id: str = ""
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    total_tokens: int = Field(default=0, ge=0)
+    web_search_calls: int = Field(default=0, ge=0)
 
     @field_validator("email", mode="before")
     @classmethod

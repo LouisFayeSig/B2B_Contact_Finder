@@ -44,6 +44,7 @@ AZURE_FOUNDRY_API_KEY=
 AZURE_FOUNDRY_MODEL_DEPLOYMENT=gpt-5.6-luna
 AZURE_FOUNDRY_REASONING_EFFORT=none
 AZURE_FOUNDRY_CA_BUNDLE=Zscaler Root CA.crt
+WEB_SEARCH_CONTEXT_SIZE=default
 SEARCH_AUDIT_ENABLED=false
 MAX_WORKERS=4
 PROCESSING_JOURNAL_PATH=logs/enrichment.pending.jsonl
@@ -82,8 +83,12 @@ Colonnes cibles ecrites :
 - `AH` (34) = Nom du deploiement Foundry demande
 - `AI` (35) = Snapshot du modele retourne par Azure
 - `AJ` (36) = Identifiant de reponse Azure
+- `AK` (37) = Tokens d'entree
+- `AL` (38) = Tokens de sortie
+- `AM` (39) = Total de tokens
+- `AN` (40) = Nombre d'appels de recherche web
 
-Les colonnes `AA:AJ` ne sont creees et renseignees que lorsque l'audit est active.
+Les colonnes `AA:AN` ne sont creees et renseignees que lorsque l'audit est active.
 
 Les entetes sont en ligne 1 et les donnees commencent en ligne 2.
 
@@ -102,6 +107,7 @@ python -m app.main --file data/20ksocietes.xlsx --sheet "Etablissements actifs (
 python -m app.main --max-rows 10 --batch-size 5
 python -m app.main --start-row 2 --max-rows 50 --batch-size 10
 python -m app.main --start-row 12 --max-rows 100 --batch-size 20 --workers 4 --audit
+python -m app.main --search-context-size low --audit
 python -m app.main --no-audit --workers 1
 python -m app.main --overwrite-existing
 python -m app.main --no-skip-if-filled
@@ -216,6 +222,37 @@ Le code reste prudent :
 - statut `technical_error` si la reponse reste inexploitable, afin de permettre une reprise
 
 Lorsque l'audit est desactive, les citations de navigation ne sont ni extraites ni ecrites dans Excel. Il peut etre active ponctuellement avec `--audit`, sans modifier `.env`. L'outil de recherche web reste necessaire au fonctionnement metier.
+
+## Benchmark cout / qualite des modeles
+
+Le benchmark relit des lignes deja terminees (`success` ou `not_found`) et utilise
+leurs valeurs `P/Q/R` comme reference. Il appelle chaque deploiement candidat sur
+exactement les memes entreprises, sans modifier le classeur source.
+
+Exemple sur 20 entreprises, avec deux deploiements Azure :
+
+```bash
+poetry run python -m app.benchmark --deployment gpt-5.6-luna --deployment gpt-5.4-nano --start-row 12 --max-rows 20 --workers 2 --search-context-size low --audit
+```
+
+Les valeurs de `--deployment` sont les noms exacts des deploiements crees dans
+Microsoft Foundry. Elles peuvent etre differentes des identifiants des modeles.
+
+Deux rapports horodates sont produits dans `benchmarks/` :
+
+- un CSV detaille par entreprise et par modele ;
+- un JSON de synthese avec taux de succes, concordance exacte des champs deja
+  trouves, nouveaux contacts, erreurs, latence, tokens et appels web.
+
+`WEB_SEARCH_CONTEXT_SIZE=low` limite le contexte des resultats de recherche remis
+au modele. C'est un levier de cout a tester en priorite pour cette extraction
+courte. La valeur `default` conserve le comportement actuel ; `medium` et `high`
+augmentent le contexte disponible.
+
+Le benchmark mesure l'usage renvoye par Azure, mais ne pretend pas recalculer la
+facture : les tarifs et les noms de compteurs Azure peuvent differer de ceux de
+l'API OpenAI directe. Comparer le rapport au cout observe dans Azure Cost
+Management sur la meme fenetre d'execution.
 
 ## Certificat entreprise / Zscaler
 

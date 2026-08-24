@@ -91,6 +91,7 @@ class AzureFoundryWebSearchService:
         response_payload = self._to_plain_data(response)
         response_id = self._read_response_string(response_payload, "id")
         model_snapshot = self._read_response_string(response_payload, "model")
+        usage = self._extract_usage(response_payload)
         return sanitize_result(
             {
                 **result.model_dump(),
@@ -99,6 +100,8 @@ class AzureFoundryWebSearchService:
                 "model_deployment": self._config.azure_foundry_model_deployment,
                 "model_snapshot": model_snapshot,
                 "response_id": response_id,
+                **usage,
+                "web_search_calls": self._count_web_search_calls(response_payload),
             }
         )
 
@@ -172,11 +175,14 @@ class AzureFoundryWebSearchService:
 
     def _build_request(self, company: CompanyRow, *, max_output_tokens: int) -> dict[str, Any]:
         user_prompt = build_company_search_prompt(company)
+        web_search_tool: dict[str, Any] = {"type": "web_search"}
+        if self._config.web_search_context_size != "default":
+            web_search_tool["search_context_size"] = self._config.web_search_context_size
         request: dict[str, Any] = {
             "model": self._config.azure_foundry_model_deployment,
             "instructions": SYSTEM_PROMPT,
             "input": user_prompt,
-            "tools": [{"type": "web_search"}],
+            "tools": [web_search_tool],
             "reasoning": {
                 "effort": self._config.azure_foundry_reasoning_effort,
             },
@@ -334,6 +340,44 @@ class AzureFoundryWebSearchService:
             return ""
         value = payload.get(key)
         return value.strip() if isinstance(value, str) else ""
+
+    def _extract_usage(self, payload: Any) -> dict[str, int]:
+        if not isinstance(payload, Mapping):
+            return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        usage = payload.get("usage")
+        if not isinstance(usage, Mapping):
+            return {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+
+        input_tokens = self._read_non_negative_int(usage.get("input_tokens"))
+        output_tokens = self._read_non_negative_int(usage.get("output_tokens"))
+        total_tokens = self._read_non_negative_int(usage.get("total_tokens"))
+        if total_tokens == 0:
+            total_tokens = input_tokens + output_tokens
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": total_tokens,
+        }
+
+    def _count_web_search_calls(self, payload: Any) -> int:
+        if not isinstance(payload, Mapping):
+            return 0
+        output_items = payload.get("output")
+        if not isinstance(output_items, list):
+            return 0
+
+        count = 0
+        for item in output_items:
+            if not isinstance(item, Mapping) or item.get("type") != "web_search_call":
+                continue
+            action = item.get("action")
+            action_type = action.get("type") if isinstance(action, Mapping) else None
+            if action_type in (None, "search"):
+                count += 1
+        return count
+
+    def _read_non_negative_int(self, value: Any) -> int:
+        return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
     def _collect_source_urls(self, values: Any, destination: list[str]) -> None:
         if not isinstance(values, list):

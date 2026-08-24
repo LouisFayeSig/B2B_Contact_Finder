@@ -37,6 +37,10 @@ class ExcelColumns:
     model_deployment: int = 34
     model_snapshot: int = 35
     response_id: int = 36
+    input_tokens: int = 37
+    output_tokens: int = 38
+    total_tokens: int = 39
+    web_search_calls: int = 40
 
 
 class ExcelService:
@@ -169,7 +173,7 @@ class ExcelService:
                 value=json.dumps(merged_sources, ensure_ascii=False) if merged_sources else None,
             )
 
-        audit_values = {
+        audit_values: dict[int, str | int] = {
             self.columns.identity_source: result.identity_source,
             self.columns.identity_match_type: result.identity_match_type.value,
             self.columns.searched_at_utc: (
@@ -178,12 +182,16 @@ class ExcelService:
             self.columns.model_deployment: result.model_deployment,
             self.columns.model_snapshot: result.model_snapshot,
             self.columns.response_id: result.response_id,
+            self.columns.input_tokens: result.input_tokens,
+            self.columns.output_tokens: result.output_tokens,
+            self.columns.total_tokens: result.total_tokens,
+            self.columns.web_search_calls: result.web_search_calls,
         }
-        for column_index, value in audit_values.items():
+        for column_index, audit_value in audit_values.items():
             self.sheet.cell(
                 row=row_index,
                 column=column_index,
-                value=None if value in ("", NOT_FOUND_LABEL) else value,
+                value=None if audit_value in ("", NOT_FOUND_LABEL) else audit_value,
             )
 
     def read_status(self, row_index: int) -> ProcessingStatus | None:
@@ -218,6 +226,13 @@ class ExcelService:
         )
         return any(value not in (None, "", NOT_FOUND_LABEL) for value in values)
 
+    def read_contact_values(self, row_index: int) -> tuple[str, str, str]:
+        return (
+            self._read_text(row_index, self.columns.email) or NOT_FOUND_LABEL,
+            self._read_text(row_index, self.columns.phone) or NOT_FOUND_LABEL,
+            self._read_text(row_index, self.columns.website) or NOT_FOUND_LABEL,
+        )
+
     def _ensure_result_headers(self) -> None:
         headers = {
             self.columns.email: "Email",
@@ -238,6 +253,10 @@ class ExcelService:
                     self.columns.model_deployment: "Model Deployment",
                     self.columns.model_snapshot: "Model Snapshot",
                     self.columns.response_id: "Azure Response ID",
+                    self.columns.input_tokens: "Input Tokens",
+                    self.columns.output_tokens: "Output Tokens",
+                    self.columns.total_tokens: "Total Tokens",
+                    self.columns.web_search_calls: "Web Search Calls",
                 }
             )
         for column_index, header in headers.items():

@@ -1,5 +1,6 @@
 .env
 logs/
+benchmarks/
 data/
 .venv/
 Zscaler Root CA.crt

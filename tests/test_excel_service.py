@@ -134,6 +134,10 @@ class ExcelServiceTests(unittest.TestCase):
             model_deployment="gpt-5.6-luna",
             model_snapshot="gpt-5.6-luna-2026-07-09",
             response_id="resp_123",
+            input_tokens=120,
+            output_tokens=45,
+            total_tokens=165,
+            web_search_calls=1,
         )
 
         self.service.write_result(2, result)
@@ -149,6 +153,10 @@ class ExcelServiceTests(unittest.TestCase):
         self.assertEqual(
             self.service.sheet.cell(row=2, column=self.service.columns.response_id).value,
             "resp_123",
+        )
+        self.assertEqual(
+            self.service.sheet.cell(row=2, column=self.service.columns.total_tokens).value,
+            165,
         )
 
 

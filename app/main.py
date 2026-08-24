@@ -35,6 +35,12 @@ def parse_args() -> argparse.Namespace:
         help="Collecte les sources par champ et les metadonnees de recherche.",
     )
     parser.add_argument(
+        "--search-context-size",
+        choices=("default", "low", "medium", "high"),
+        default=None,
+        help="Volume de contexte retourne par la recherche web.",
+    )
+    parser.add_argument(
         "--skip-if-filled",
         dest="skip_if_filled",
         action=argparse.BooleanOptionalAction,

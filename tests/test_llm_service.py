@@ -16,6 +16,7 @@ class AzureFoundryWebSearchServiceTests(unittest.TestCase):
         self.service._config = SimpleNamespace(
             azure_foundry_model_deployment="gpt-5.6-luna",
             azure_foundry_reasoning_effort="none",
+            web_search_context_size="default",
             search_audit_enabled=True,
         )
         self.company = CompanyRow(
@@ -42,10 +43,21 @@ class AzureFoundryWebSearchServiceTests(unittest.TestCase):
 
         self.assertNotIn("include", request)
 
+    def test_request_can_reduce_web_search_context(self) -> None:
+        self.service._config.web_search_context_size = "low"
+
+        request = self.service._build_request(self.company, max_output_tokens=600)
+
+        self.assertEqual(
+            request["tools"],
+            [{"type": "web_search", "search_context_size": "low"}],
+        )
+
     def test_search_result_contains_validated_contacts_and_sources(self) -> None:
         response = {
             "id": "resp_test",
             "model": "gpt-5.6-luna-2026-07-09",
+            "usage": {"input_tokens": 120, "output_tokens": 45, "total_tokens": 165},
             "output_text": (
                 '{"email":"contact@example.com","phone":"abc","website":"example.com",'
                 '"email_source":"https://example.com/contact",'
@@ -73,6 +85,8 @@ class AzureFoundryWebSearchServiceTests(unittest.TestCase):
         self.assertEqual(result.phone_source, "Non trouvé")
         self.assertEqual(result.response_id, "resp_test")
         self.assertEqual(result.model_snapshot, "gpt-5.6-luna-2026-07-09")
+        self.assertEqual(result.total_tokens, 165)
+        self.assertEqual(result.web_search_calls, 1)
 
     def test_search_result_omits_sources_when_audit_is_disabled(self) -> None:
         self.service._config.search_audit_enabled = False

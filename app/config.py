@@ -24,6 +24,7 @@ class AppConfig:
     azure_foundry_api_key: str
     azure_foundry_model_deployment: str
     azure_foundry_reasoning_effort: str
+    web_search_context_size: str
     search_audit_enabled: bool
     max_workers: int
     request_timeout: float
@@ -56,6 +57,7 @@ class AppConfig:
             azure_foundry_api_key=os.getenv("AZURE_FOUNDRY_API_KEY", "").strip(),
             azure_foundry_model_deployment=os.getenv("AZURE_FOUNDRY_MODEL_DEPLOYMENT", "gpt-5.6-luna").strip(),
             azure_foundry_reasoning_effort=os.getenv("AZURE_FOUNDRY_REASONING_EFFORT", "none").strip().lower(),
+            web_search_context_size=os.getenv("WEB_SEARCH_CONTEXT_SIZE", "default").strip().lower(),
             search_audit_enabled=parse_bool(os.getenv("SEARCH_AUDIT_ENABLED"), default=False),
             max_workers=_env_int("MAX_WORKERS", 4),
             request_timeout=_env_float("REQUEST_TIMEOUT", 90.0),
@@ -98,6 +100,11 @@ class AppConfig:
             updated = replace(updated, search_audit_enabled=bool(args.audit))
         if getattr(args, "workers", None) is not None:
             updated = replace(updated, max_workers=int(args.workers))
+        if getattr(args, "search_context_size", None) is not None:
+            updated = replace(
+                updated,
+                web_search_context_size=str(args.search_context_size).strip().lower(),
+            )
 
         updated.validate()
         return updated
@@ -134,6 +141,8 @@ class AppConfig:
             "max",
         }:
             raise ValueError("AZURE_FOUNDRY_REASONING_EFFORT doit valoir none, low, medium, high, xhigh ou max.")
+        if self.web_search_context_size not in {"default", "low", "medium", "high"}:
+            raise ValueError("WEB_SEARCH_CONTEXT_SIZE doit valoir default, low, medium ou high.")
         if self.input_excel_path.suffix.lower() != ".xlsx":
             raise ValueError("INPUT_EXCEL_PATH doit pointer vers un fichier .xlsx.")
         if self.azure_foundry_ca_bundle is not None and not self.azure_foundry_ca_bundle.exists():
