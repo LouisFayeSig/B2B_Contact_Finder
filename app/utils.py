@@ -7,9 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from app.models import CompanyResult
-
-NOT_FOUND_LABEL = "Non trouvé"
+from app.models import NOT_FOUND_LABEL, CompanyResult
 
 _MISSING_TOKENS = {
     "",
@@ -102,11 +100,11 @@ def sanitize_result(value: CompanyResult | dict[str, Any] | None) -> CompanyResu
     else:
         payload = dict(value)
 
-    return CompanyResult(
-        email=normalize_missing_value(payload.get("email")),
-        phone=normalize_missing_value(payload.get("phone")),
-        website=normalize_missing_value(payload.get("website")),
-    )
+    payload["email"] = normalize_missing_value(payload.get("email"))
+    payload["phone"] = normalize_missing_value(payload.get("phone"))
+    payload["website"] = normalize_missing_value(payload.get("website"))
+    payload["sources"] = payload.get("sources") or []
+    return CompanyResult.model_validate(payload)
 
 
 def chunked(items: Sequence[Any], size: int) -> Iterator[list[Any]]:

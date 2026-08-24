@@ -1,6 +1,6 @@
-# Enrichissement Excel d'entreprises via OpenAI Responses API
+# Enrichissement Excel d'entreprises via Microsoft Foundry
 
-Ce projet enrichit un fichier Excel d'entreprises en recherchant sur internet, via un modele OpenAI avec outil de recherche web, un email, un telephone et un site web.
+Ce projet enrichit un fichier Excel d'entreprises en recherchant sur internet, via un deploiement Azure OpenAI dans Microsoft Foundry avec l'outil `web_search`, un email, un telephone et un site web. Chaque ligne conserve un statut de traitement. La collecte des sources web est facultative.
 
 Le pipeline lit un classeur existant, traite les lignes par batch, ecrit les resultats directement dans le fichier source, puis sauvegarde apres chaque batch. Si une information n'est pas trouvee ou reste trop incertaine, la valeur ecrite est exactement `Non trouvé`.
 
@@ -8,15 +8,22 @@ Le pipeline lit un classeur existant, traite les lignes par batch, ecrit les res
 
 - Python 3.11+
 - Un fichier Excel `.xlsx`
-- Une cle API OpenAI valide
+- Un projet Microsoft Foundry et un deploiement Azure OpenAI compatible avec la Responses API
+- Une authentification Microsoft Entra ID ou, pour un POC, une cle API Azure
 
 ## Installation
 
 ```bash
-python -m venv .venv
-.venv\\Scripts\\activate
-pip install -r requirements.txt
+poetry install
 copy .env.example .env
+```
+
+Toutes les dependances runtime et de developpement sont declarees dans `pyproject.toml` et verrouillees dans `poetry.lock`.
+
+Pour l'authentification Entra ID en local :
+
+```bash
+az login
 ```
 
 ## Configuration
@@ -24,17 +31,22 @@ copy .env.example .env
 Renseigner le fichier `.env` :
 
 ```dotenv
-INPUT_EXCEL_PATH=20ksocietes.xlsx
+INPUT_EXCEL_PATH=data/20ksocietes.xlsx
 SHEET_NAME=Etablissements actifs (tous)
 START_ROW=2
 MAX_ROWS=
-BATCH_SIZE=20
+BATCH_SIZE=100
 SAVE_EVERY_BATCH=true
 SKIP_IF_FILLED=true
 OVERWRITE_EXISTING=false
-OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4.1-mini
-OPENAI_CA_BUNDLE=Zscaler Root CA.crt
+AZURE_FOUNDRY_ENDPOINT=https://<resource>.openai.azure.com/openai/v1/
+AZURE_FOUNDRY_API_KEY=
+AZURE_FOUNDRY_MODEL_DEPLOYMENT=gpt-5.6-luna
+AZURE_FOUNDRY_REASONING_EFFORT=none
+AZURE_FOUNDRY_CA_BUNDLE=Zscaler Root CA.crt
+SEARCH_AUDIT_ENABLED=false
+MAX_WORKERS=4
+PROCESSING_JOURNAL_PATH=logs/enrichment.pending.jsonl
 REQUEST_TIMEOUT=90
 MAX_RETRIES=3
 RETRY_WAIT_SECONDS=5
@@ -59,6 +71,19 @@ Colonnes cibles ecrites :
 - `P` (16) = Email
 - `Q` (17) = Telephone
 - `R` (18) = Site Web
+- `Z` (26) = Statut (`success`, `not_found`, `technical_error`, `invalid_input`)
+- `AA` (27) = Toutes les pages consultees, au format JSON
+- `AB` (28) = Source de l'email
+- `AC` (29) = Source du telephone
+- `AD` (30) = Source du site web
+- `AE` (31) = Source de la preuve d'identite
+- `AF` (32) = Type de rapprochement (`siret`, `name_and_address`, `name_and_city`, `none`)
+- `AG` (33) = Horodatage UTC de la recherche
+- `AH` (34) = Nom du deploiement Foundry demande
+- `AI` (35) = Snapshot du modele retourne par Azure
+- `AJ` (36) = Identifiant de reponse Azure
+
+Les colonnes `AA:AJ` ne sont creees et renseignees que lorsque l'audit est active.
 
 Les entetes sont en ligne 1 et les donnees commencent en ligne 2.
 
@@ -73,9 +98,11 @@ python -m app.main
 Exemples avec surcharge CLI :
 
 ```bash
-python -m app.main --file 20ksocietes.xlsx --sheet "Etablissements actifs (tous)"
+python -m app.main --file data/20ksocietes.xlsx --sheet "Etablissements actifs (tous)"
 python -m app.main --max-rows 10 --batch-size 5
 python -m app.main --start-row 2 --max-rows 50 --batch-size 10
+python -m app.main --start-row 12 --max-rows 100 --batch-size 20 --workers 4 --audit
+python -m app.main --no-audit --workers 1
 python -m app.main --overwrite-existing
 python -m app.main --no-skip-if-filled
 ```
@@ -86,28 +113,36 @@ python -m app.main --no-skip-if-filled
 2. Creation d'un backup avant toute modification si `CREATE_BACKUP=true`.
 3. Lecture des lignes a partir de `START_ROW`.
 4. Limitation eventuelle a `MAX_ROWS` pour un POC ou un traitement partiel.
-5. Application des regles `OVERWRITE_EXISTING` puis `SKIP_IF_FILLED`.
-6. Recherche web via OpenAI Responses API.
-7. Parsing JSON robuste avec fallback complet sur `Non trouvé`.
-8. Ecriture directe dans les colonnes `P/Q/R`.
-9. Sauvegarde du meme fichier a la fin de chaque batch si `SAVE_EVERY_BATCH=true`.
+5. Application des regles de statut, `OVERWRITE_EXISTING` puis `SKIP_IF_FILLED`.
+6. Recherches web en parallele via la Responses API du deploiement Microsoft Foundry, dans la limite de `MAX_WORKERS`.
+7. Verification de l'identite, parsing JSON et validation des coordonnees.
+8. Lorsque l'audit est active, controle que chaque preuve cite une page reellement consultee.
+9. Ecriture sequentielle et non destructive dans Excel, avec journalisation durable avant chaque modification.
+10. Sauvegarde du meme fichier a la fin de chaque batch si `SAVE_EVERY_BATCH=true`, puis purge du journal confirme.
 
 ## Regles metier
 
-- Aucun recontrole de SIRET.
 - Aucun score de confiance.
-- Aucun matching complexe.
-- Si une ligne n'a pas de SIRET ou pas de raison sociale, le script ecrit `Non trouvé`.
-- Si l'appel API echoue, le script journalise l'erreur, ecrit `Non trouvé` et continue.
-- Si le parsing JSON echoue, le script ecrit `Non trouvé`.
+- Un SIRET d'entree doit contenir exactement 14 chiffres ; sinon la ligne devient `invalid_input`.
+- Avant de conserver un contact, le modele doit confirmer l'identite par SIRET exact ou par concordance du nom et de l'adresse/ville.
+- Un nom seul, generique ou homonyme, n'est jamais une preuve suffisante.
+- Si l'identite n'est pas verifiee, toutes les coordonnees sont forcees a `Non trouve`.
+- En mode audit, une preuve qui ne figure pas parmi les pages effectivement consultees est rejetee.
+- Si l'appel API ou le parsing echoue, son statut devient `technical_error`, les coordonnees existantes restent intactes et la ligne sera retentee au prochain lancement.
+- Un resultat valide mais vide devient `not_found`.
+- Les emails, telephones et URL invalides sont normalises en `Non trouvé` avant ecriture.
+- Sans `OVERWRITE_EXISTING`, seules les cellules vides ou egales a `Non trouvé` sont completees ; les contacts existants sont preserves.
 
 ## Skip et overwrite
 
 Priorite appliquee :
 
-1. Si `OVERWRITE_EXISTING=true`, la ligne est toujours retraitee.
-2. Sinon, si `SKIP_IF_FILLED=true` et que `P/Q/R` sont deja toutes remplies, la ligne est skippee.
-3. Sinon, la ligne est traitee.
+1. Si `OVERWRITE_EXISTING=true`, la ligne est toujours retraitee et les valeurs sont remplacees.
+2. Une ligne `technical_error` est toujours retentee.
+3. Une ligne `success` ou `not_found` est skippee si `SKIP_IF_FILLED=true`.
+4. Une ligne `invalid_input` est retentee des que son SIRET et sa raison sociale ont ete corriges.
+5. Pour un ancien classeur sans statut, une ligne dont `P/Q/R` sont toutes remplies reste skippee.
+6. Une ligne partielle est traitee, mais ses cellules deja renseignees sont preservees.
 
 ## Logging
 
@@ -128,41 +163,74 @@ Messages journalises :
 - enrichissement
 - erreur
 - sauvegarde
+- reprise eventuelle du journal
 - resume final
+
+## Reprise apres interruption
+
+Avant toute modification d'une ligne, le resultat est ajoute a
+`PROCESSING_JOURNAL_PATH`. Le fichier est force sur disque, puis Excel est mis a
+jour. Apres une sauvegarde Excel reussie, le journal est supprime.
+
+Au lancement suivant, un journal encore present est rejoue automatiquement avant
+de reprendre les recherches. Chaque entree est comparee au SIRET et a la raison
+sociale de la ligne actuelle ; en cas de decalage, le programme s'arrete sans
+appliquer le journal afin d'eviter une ecriture sur la mauvaise entreprise.
 
 ## Backup automatique
 
 Le script modifie le fichier source directement. Avant la premiere sauvegarde, il cree un backup horodate de type :
 
 ```text
-20ksocietes.backup.YYYYMMDD_HHMMSS.xlsx
+data/20ksocietes.backup.YYYYMMDD_HHMMSS.xlsx
 ```
 
 ## Precautions avant execution
 
 - Tester d'abord avec `MAX_ROWS=10` ou `MAX_ROWS=50`.
+- Commencer avec `MAX_WORKERS=4`; reduire a `1` ou `2` en cas de limitation de debit Azure.
 - Verifier le nom de feuille Excel.
 - Verifier que les colonnes `P/Q/R` peuvent etre ecrasees selon votre mode choisi.
 - Garder le fichier Excel ferme pendant l'execution pour eviter les verrous d'ecriture.
 
-## Remarques OpenAI
+## Microsoft Foundry et choix du modele
 
-Le service utilise `responses.create` avec l'outil `web_search` et un format de sortie `json_schema`. Le code reste prudent :
+Le service utilise le SDK OpenAI avec l'endpoint compatible `/openai/v1/` de Microsoft Foundry, `responses.create`, l'outil `web_search` et un format de sortie `json_schema`.
+
+Le projet utilise un seul deploiement, configure par `AZURE_FOUNDRY_MODEL_DEPLOYMENT`. Le choix par defaut est `gpt-5.6-luna` avec `reasoning.effort=none` : il correspond au niveau economique/nano de la gamme actuelle et convient a une extraction structuree volumique. La valeur configuree est le **nom du deploiement Azure**, qui peut etre different de l'ID du modele.
+
+L'endpoint peut etre :
+
+- un endpoint Azure OpenAI, par exemple `https://<resource>.openai.azure.com/openai/v1/` ;
+- un endpoint de projet Foundry se terminant par `/openai/v1/`.
+
+Si `AZURE_FOUNDRY_API_KEY` est vide, le service utilise `DefaultAzureCredential`. En local, cette chaine peut reutiliser la session `az login`; en production, une identite managee est recommandee.
+
+Le code reste prudent :
 
 - extraction de `output_text` si disponible
+- inclusion de `web_search_call.action.sources` seulement si `SEARCH_AUDIT_ENABLED=true`
 - fallback vers l'analyse du payload brut
 - tentative de `json.loads`
 - extraction du premier bloc JSON si le modele renvoie du texte parasite
-- fallback final vers `Non trouvé`
+- statut `technical_error` si la reponse reste inexploitable, afin de permettre une reprise
 
-Pour un traitement volumique, `gpt-4.1-mini` est le choix par defaut recommande dans ce projet. Lors des tests reels ici, le certificat Zscaler a bien permis la connexion, et `gpt-4.1-mini` a retourne une reponse exploitable, alors que `gpt-5` restait bloque dans une boucle de recherche web avec reponses `incomplete`.
+Lorsque l'audit est desactive, les citations de navigation ne sont ni extraites ni ecrites dans Excel. Il peut etre active ponctuellement avec `--audit`, sans modifier `.env`. L'outil de recherche web reste necessaire au fonctionnement metier.
 
 ## Certificat entreprise / Zscaler
 
 Si votre proxy TLS d'entreprise intercepte la connexion OpenAI, renseignez :
 
 ```dotenv
-OPENAI_CA_BUNDLE=Zscaler Root CA.crt
+AZURE_FOUNDRY_CA_BUNDLE=Zscaler Root CA.crt
 ```
 
-Le projet charge alors explicitement ce certificat dans le client HTTP OpenAI via un contexte SSL dedie. Si `OPENAI_CA_BUNDLE` n'est pas renseigne, le code essaie automatiquement de detecter `Zscaler Root CA.crt` ou `zscaler_root_ra.crt` a la racine du projet.
+Le projet charge alors explicitement ce certificat dans le client HTTP vers Foundry via un contexte SSL dedie. Si `AZURE_FOUNDRY_CA_BUNDLE` n'est pas renseigne, le code essaie automatiquement de detecter `Zscaler Root CA.crt` ou `zscaler_root_ra.crt` a la racine du projet.
+
+## Tests et qualite
+
+```bash
+poetry run pytest
+poetry run ruff check app tests
+poetry run mypy app
+```

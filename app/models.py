@@ -1,6 +1,52 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+import re
+from datetime import datetime
+from enum import StrEnum
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+NOT_FOUND_LABEL = "Non trouvé"
+
+_MISSING_TOKENS = {
+    "",
+    "none",
+    "null",
+    "unknown",
+    "n/a",
+    "na",
+    "not found",
+    "introuvable",
+    "aucun",
+    "aucune",
+    "non disponible",
+    "non renseigne",
+    "non renseigné",
+    "non trouve",
+    "non trouvé",
+}
+_EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_PHONE_PATTERN = re.compile(r"^[+()\d\s./-]+$")
+
+
+class ProcessingStatus(StrEnum):
+    """Etat persistant distinguant résultat métier et incident technique."""
+
+    SUCCESS = "success"
+    NOT_FOUND = "not_found"
+    TECHNICAL_ERROR = "technical_error"
+    INVALID_INPUT = "invalid_input"
+
+
+class IdentityMatchType(StrEnum):
+    """Niveau de preuve utilise pour rattacher les contacts a l'entreprise."""
+
+    SIRET = "siret"
+    NAME_AND_ADDRESS = "name_and_address"
+    NAME_AND_CITY = "name_and_city"
+    NONE = "none"
 
 
 class CompanyRow(BaseModel):
@@ -15,19 +61,131 @@ class CompanyRow(BaseModel):
     postal_code: str | None = None
     city: str | None = None
 
+    @property
+    def normalized_siret(self) -> str:
+        return "".join(character for character in self.siret if character.isdigit())
+
+    @property
+    def has_valid_siret(self) -> bool:
+        return len(self.normalized_siret) == 14
+
 
 class CompanyResult(BaseModel):
-    """Coordonnees retournees par le service LLM."""
+    """Coordonnees validées et sources retournées par le service de recherche."""
 
     model_config = ConfigDict(str_strip_whitespace=True)
 
-    email: str = Field(default="Non trouvé")
-    phone: str = Field(default="Non trouvé")
-    website: str = Field(default="Non trouvé")
+    email: str = Field(default=NOT_FOUND_LABEL)
+    phone: str = Field(default=NOT_FOUND_LABEL)
+    website: str = Field(default=NOT_FOUND_LABEL)
+    sources: list[str] = Field(default_factory=list, max_length=20)
+    email_source: str = Field(default=NOT_FOUND_LABEL)
+    phone_source: str = Field(default=NOT_FOUND_LABEL)
+    website_source: str = Field(default=NOT_FOUND_LABEL)
+    identity_verified: bool = False
+    identity_match_type: IdentityMatchType = IdentityMatchType.NONE
+    identity_source: str = Field(default=NOT_FOUND_LABEL)
+    searched_at_utc: datetime | None = None
+    model_deployment: str = ""
+    model_snapshot: str = ""
+    response_id: str = ""
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def validate_email(cls, value: Any) -> str:
+        text = _normalize_text(value)
+        if text == NOT_FOUND_LABEL:
+            return text
+        if text.lower().startswith("mailto:"):
+            text = text[7:].strip()
+        if len(text) > 254 or _EMAIL_PATTERN.fullmatch(text) is None:
+            return NOT_FOUND_LABEL
+        return text
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def validate_phone(cls, value: Any) -> str:
+        text = _normalize_text(value)
+        if text == NOT_FOUND_LABEL:
+            return text
+        if text.lower().startswith("tel:"):
+            text = text[4:].strip()
+        digit_count = sum(character.isdigit() for character in text)
+        if not 7 <= digit_count <= 15 or _PHONE_PATTERN.fullmatch(text) is None:
+            return NOT_FOUND_LABEL
+        return text
+
+    @field_validator("website", mode="before")
+    @classmethod
+    def validate_website(cls, value: Any) -> str:
+        return _normalize_http_url(value)
+
+    @field_validator("sources", mode="before")
+    @classmethod
+    def validate_sources(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            raw_sources = [value]
+        elif isinstance(value, list | tuple | set):
+            raw_sources = list(value)
+        else:
+            return []
+        sources: list[str] = []
+        for raw_source in raw_sources:
+            source = _normalize_http_url(raw_source)
+            if source != NOT_FOUND_LABEL and source not in sources:
+                sources.append(source)
+            if len(sources) == 20:
+                break
+        return sources
+
+    @field_validator(
+        "email_source",
+        "phone_source",
+        "website_source",
+        "identity_source",
+        mode="before",
+    )
+    @classmethod
+    def validate_evidence_url(cls, value: Any) -> str:
+        return _normalize_http_url(value)
+
+    @model_validator(mode="after")
+    def enforce_identity_consistency(self) -> CompanyResult:
+        if not self.identity_verified or self.identity_match_type is IdentityMatchType.NONE:
+            self.identity_verified = False
+            self.identity_match_type = IdentityMatchType.NONE
+            self.email = NOT_FOUND_LABEL
+            self.phone = NOT_FOUND_LABEL
+            self.website = NOT_FOUND_LABEL
+            self.email_source = NOT_FOUND_LABEL
+            self.phone_source = NOT_FOUND_LABEL
+            self.website_source = NOT_FOUND_LABEL
+
+        for value_field, source_field in (
+            ("email", "email_source"),
+            ("phone", "phone_source"),
+            ("website", "website_source"),
+        ):
+            if getattr(self, value_field) == NOT_FOUND_LABEL:
+                setattr(self, source_field, NOT_FOUND_LABEL)
+        return self
+
+    @property
+    def is_not_found(self) -> bool:
+        return all(value == NOT_FOUND_LABEL for value in (self.email, self.phone, self.website))
 
     @classmethod
-    def not_found(cls) -> "CompanyResult":
-        return cls(email="Non trouvé", phone="Non trouvé", website="Non trouvé")
+    def not_found(cls, *, sources: list[str] | None = None) -> CompanyResult:
+        return cls(
+            email=NOT_FOUND_LABEL,
+            phone=NOT_FOUND_LABEL,
+            website=NOT_FOUND_LABEL,
+            sources=sources or [],
+            identity_verified=False,
+            identity_match_type=IdentityMatchType.NONE,
+        )
 
 
 class ProcessingStats(BaseModel):
@@ -38,5 +196,34 @@ class ProcessingStats(BaseModel):
     processed_rows: int = 0
     skipped_rows: int = 0
     success_rows: int = 0
+    not_found_rows: int = 0
+    technical_error_rows: int = 0
+    invalid_input_rows: int = 0
     failed_rows: int = 0
     saved_batches: int = 0
+    recovered_rows: int = 0
+
+
+def _normalize_text(value: Any) -> str:
+    if value is None:
+        return NOT_FOUND_LABEL
+    text = " ".join(str(value).strip().split())
+    if text.lower() in _MISSING_TOKENS:
+        return NOT_FOUND_LABEL
+    return text
+
+
+def _normalize_http_url(value: Any) -> str:
+    text = _normalize_text(value)
+    if text == NOT_FOUND_LABEL:
+        return text
+    candidate = text if "://" in text else f"https://{text}"
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        return NOT_FOUND_LABEL
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return NOT_FOUND_LABEL
+    if "." not in parsed.hostname:
+        return NOT_FOUND_LABEL
+    return urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path, parsed.query, ""))

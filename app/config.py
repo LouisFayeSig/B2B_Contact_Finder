@@ -20,8 +20,12 @@ class AppConfig:
     save_every_batch: bool
     skip_if_filled: bool
     overwrite_existing: bool
-    openai_api_key: str
-    openai_model: str
+    azure_foundry_endpoint: str
+    azure_foundry_api_key: str
+    azure_foundry_model_deployment: str
+    azure_foundry_reasoning_effort: str
+    search_audit_enabled: bool
+    max_workers: int
     request_timeout: float
     max_retries: int
     retry_wait_seconds: float
@@ -29,40 +33,51 @@ class AppConfig:
     sleep_between_batches: float
     log_level: str
     create_backup: bool
-    openai_ca_bundle: Path | None
+    azure_foundry_ca_bundle: Path | None
     log_file_path: Path
+    journal_file_path: Path
 
     @classmethod
-    def from_env(cls) -> "AppConfig":
+    def from_env(cls) -> AppConfig:
         load_dotenv(override=False)
 
         sheet_name = os.getenv("SHEET_NAME", "").strip() or None
-        openai_ca_bundle = _resolve_ca_bundle_path(os.getenv("OPENAI_CA_BUNDLE"))
+        azure_foundry_ca_bundle = _resolve_ca_bundle_path(os.getenv("AZURE_FOUNDRY_CA_BUNDLE"))
         config = cls(
-            input_excel_path=Path(os.getenv("INPUT_EXCEL_PATH", "20ksocietes.xlsx")).expanduser(),
+            input_excel_path=Path(os.getenv("INPUT_EXCEL_PATH", "data/20ksocietes.xlsx")).expanduser(),
             sheet_name=sheet_name,
-            start_row=parse_optional_int(os.getenv("START_ROW")) or 2,
+            start_row=_env_int("START_ROW", 2),
             max_rows=parse_optional_int(os.getenv("MAX_ROWS")),
-            batch_size=parse_optional_int(os.getenv("BATCH_SIZE")) or 20,
+            batch_size=_env_int("BATCH_SIZE", 100),
             save_every_batch=parse_bool(os.getenv("SAVE_EVERY_BATCH"), default=True),
             skip_if_filled=parse_bool(os.getenv("SKIP_IF_FILLED"), default=True),
             overwrite_existing=parse_bool(os.getenv("OVERWRITE_EXISTING"), default=False),
-            openai_api_key=os.getenv("OPENAI_API_KEY", "").strip(),
-            openai_model=os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip(),
-            request_timeout=parse_optional_float(os.getenv("REQUEST_TIMEOUT")) or 90.0,
-            max_retries=parse_optional_int(os.getenv("MAX_RETRIES")) or 3,
-            retry_wait_seconds=parse_optional_float(os.getenv("RETRY_WAIT_SECONDS")) or 5.0,
-            sleep_between_calls=parse_optional_float(os.getenv("SLEEP_BETWEEN_CALLS")) or 0.0,
-            sleep_between_batches=parse_optional_float(os.getenv("SLEEP_BETWEEN_BATCHES")) or 0.0,
+            azure_foundry_endpoint=_normalize_foundry_endpoint(os.getenv("AZURE_FOUNDRY_ENDPOINT", "")),
+            azure_foundry_api_key=os.getenv("AZURE_FOUNDRY_API_KEY", "").strip(),
+            azure_foundry_model_deployment=os.getenv("AZURE_FOUNDRY_MODEL_DEPLOYMENT", "gpt-5.6-luna").strip(),
+            azure_foundry_reasoning_effort=os.getenv("AZURE_FOUNDRY_REASONING_EFFORT", "none").strip().lower(),
+            search_audit_enabled=parse_bool(os.getenv("SEARCH_AUDIT_ENABLED"), default=False),
+            max_workers=_env_int("MAX_WORKERS", 4),
+            request_timeout=_env_float("REQUEST_TIMEOUT", 90.0),
+            max_retries=_env_int("MAX_RETRIES", 3),
+            retry_wait_seconds=_env_float("RETRY_WAIT_SECONDS", 5.0),
+            sleep_between_calls=_env_float("SLEEP_BETWEEN_CALLS", 0.0),
+            sleep_between_batches=_env_float("SLEEP_BETWEEN_BATCHES", 0.0),
             log_level=os.getenv("LOG_LEVEL", "INFO").strip().upper() or "INFO",
             create_backup=parse_bool(os.getenv("CREATE_BACKUP"), default=True),
-            openai_ca_bundle=openai_ca_bundle,
+            azure_foundry_ca_bundle=azure_foundry_ca_bundle,
             log_file_path=Path("logs") / "enrichment.log",
+            journal_file_path=Path(
+                os.getenv(
+                    "PROCESSING_JOURNAL_PATH",
+                    "logs/enrichment.pending.jsonl",
+                )
+            ).expanduser(),
         )
         config.validate()
         return config
 
-    def apply_cli_overrides(self, args: argparse.Namespace) -> "AppConfig":
+    def apply_cli_overrides(self, args: argparse.Namespace) -> AppConfig:
         updated = self
 
         if getattr(args, "file", None):
@@ -79,6 +94,10 @@ class AppConfig:
             updated = replace(updated, skip_if_filled=bool(args.skip_if_filled))
         if getattr(args, "overwrite_existing", None) is not None:
             updated = replace(updated, overwrite_existing=bool(args.overwrite_existing))
+        if getattr(args, "audit", None) is not None:
+            updated = replace(updated, search_audit_enabled=bool(args.audit))
+        if getattr(args, "workers", None) is not None:
+            updated = replace(updated, max_workers=int(args.workers))
 
         updated.validate()
         return updated
@@ -94,10 +113,31 @@ class AppConfig:
             raise ValueError("REQUEST_TIMEOUT doit etre > 0.")
         if self.max_retries <= 0:
             raise ValueError("MAX_RETRIES doit etre > 0.")
+        if self.retry_wait_seconds < 0:
+            raise ValueError("RETRY_WAIT_SECONDS doit etre >= 0.")
+        if self.sleep_between_calls < 0:
+            raise ValueError("SLEEP_BETWEEN_CALLS doit etre >= 0.")
+        if self.sleep_between_batches < 0:
+            raise ValueError("SLEEP_BETWEEN_BATCHES doit etre >= 0.")
+        if not 1 <= self.max_workers <= 32:
+            raise ValueError("MAX_WORKERS doit etre compris entre 1 et 32.")
+        if not self.azure_foundry_endpoint:
+            raise ValueError("AZURE_FOUNDRY_ENDPOINT est obligatoire.")
+        if not self.azure_foundry_model_deployment:
+            raise ValueError("AZURE_FOUNDRY_MODEL_DEPLOYMENT est obligatoire.")
+        if self.azure_foundry_reasoning_effort not in {
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        }:
+            raise ValueError("AZURE_FOUNDRY_REASONING_EFFORT doit valoir none, low, medium, high, xhigh ou max.")
         if self.input_excel_path.suffix.lower() != ".xlsx":
             raise ValueError("INPUT_EXCEL_PATH doit pointer vers un fichier .xlsx.")
-        if self.openai_ca_bundle is not None and not self.openai_ca_bundle.exists():
-            raise ValueError(f"OPENAI_CA_BUNDLE introuvable : {self.openai_ca_bundle}")
+        if self.azure_foundry_ca_bundle is not None and not self.azure_foundry_ca_bundle.exists():
+            raise ValueError(f"AZURE_FOUNDRY_CA_BUNDLE introuvable : {self.azure_foundry_ca_bundle}")
 
 
 def build_config(args: argparse.Namespace | None = None) -> AppConfig:
@@ -117,3 +157,22 @@ def _resolve_ca_bundle_path(raw_value: str | None) -> Path | None:
             return candidate_path
 
     return None
+
+
+def _normalize_foundry_endpoint(raw_value: str) -> str:
+    endpoint = raw_value.strip().rstrip("/")
+    if not endpoint:
+        return ""
+    if endpoint.endswith("/openai/v1"):
+        return f"{endpoint}/"
+    return f"{endpoint}/openai/v1/"
+
+
+def _env_int(name: str, default: int) -> int:
+    value = parse_optional_int(os.getenv(name))
+    return default if value is None else value
+
+
+def _env_float(name: str, default: float) -> float:
+    value = parse_optional_float(os.getenv(name))
+    return default if value is None else value

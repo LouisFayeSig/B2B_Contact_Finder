@@ -4,12 +4,19 @@ import json
 import logging
 import ssl
 from collections.abc import Mapping
-from typing import Any, Protocol, TYPE_CHECKING
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Protocol
 
-from tenacity import Retrying, before_sleep_log, stop_after_attempt, wait_fixed
+from tenacity import (
+    Retrying,
+    before_sleep_log,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_fixed,
+)
 
 from app.config import AppConfig
-from app.models import CompanyResult, CompanyRow
+from app.models import NOT_FOUND_LABEL, CompanyResult, CompanyRow
 from app.prompts import SYSTEM_PROMPT, build_company_search_prompt
 from app.utils import sanitize_result, try_parse_json
 
@@ -18,8 +25,11 @@ if TYPE_CHECKING:
 
 
 class CompanySearchService(Protocol):
-    def search_company_contact(self, company: CompanyRow) -> CompanyResult:
-        ...
+    def search_company_contact(self, company: CompanyRow) -> CompanyResult: ...
+
+
+class ModelResponseError(RuntimeError):
+    """Réponse API reçue mais inutilisable ; la ligne doit rester retraitable."""
 
 
 RESULT_JSON_SCHEMA: dict[str, Any] = {
@@ -28,8 +38,27 @@ RESULT_JSON_SCHEMA: dict[str, Any] = {
         "email": {"type": "string"},
         "phone": {"type": "string"},
         "website": {"type": "string"},
+        "email_source": {"type": "string"},
+        "phone_source": {"type": "string"},
+        "website_source": {"type": "string"},
+        "identity_verified": {"type": "boolean"},
+        "identity_match_type": {
+            "type": "string",
+            "enum": ["siret", "name_and_address", "name_and_city", "none"],
+        },
+        "identity_source": {"type": "string"},
     },
-    "required": ["email", "phone", "website"],
+    "required": [
+        "email",
+        "phone",
+        "website",
+        "email_source",
+        "phone_source",
+        "website_source",
+        "identity_verified",
+        "identity_match_type",
+        "identity_source",
+    ],
     "additionalProperties": False,
 }
 
@@ -37,7 +66,7 @@ DEFAULT_MAX_OUTPUT_TOKENS = 600
 RETRY_MAX_OUTPUT_TOKENS = 1200
 
 
-class OpenAIWebSearchService:
+class AzureFoundryWebSearchService:
     def __init__(self, config: AppConfig, logger: Any) -> None:
         self._config = config
         self._logger = logger
@@ -53,9 +82,25 @@ class OpenAIWebSearchService:
                 company.row_index,
                 company.company_name,
             )
-            return CompanyResult.not_found()
+            raise ModelResponseError("Réponse Azure Foundry vide ou non exploitable.")
 
-        return self._parse_json_response(response_text)
+        result = self._parse_json_response(response_text)
+        sources = self._extract_web_search_sources(response) if self._config.search_audit_enabled else []
+        result = self._apply_audit_evidence_policy(result, sources)
+
+        response_payload = self._to_plain_data(response)
+        response_id = self._read_response_string(response_payload, "id")
+        model_snapshot = self._read_response_string(response_payload, "model")
+        return sanitize_result(
+            {
+                **result.model_dump(),
+                "sources": sources,
+                "searched_at_utc": datetime.now(UTC),
+                "model_deployment": self._config.azure_foundry_model_deployment,
+                "model_snapshot": model_snapshot,
+                "response_id": response_id,
+            }
+        )
 
     def _request_with_token_retry(self, company: CompanyRow) -> Any:
         request_payload = self._build_request(company, max_output_tokens=DEFAULT_MAX_OUTPUT_TOKENS)
@@ -77,14 +122,23 @@ class OpenAIWebSearchService:
             return self._perform_request(expanded_payload)
         except Exception:
             self._logger.exception(
-                "Echec API OpenAI apres retries pour la ligne %s (%s).",
+                "Echec API Azure Foundry apres retries pour la ligne %s (%s).",
                 company.row_index,
                 company.company_name,
             )
             raise
 
-    def _build_client(self) -> "OpenAI":
+    def _build_client(self) -> OpenAI:
         from openai import DefaultHttpxClient, OpenAI
+
+        api_key: Any = self._config.azure_foundry_api_key
+        if not api_key:
+            from azure.identity import DefaultAzureCredential, get_bearer_token_provider
+
+            api_key = get_bearer_token_provider(
+                DefaultAzureCredential(),
+                "https://ai.azure.com/.default",
+            )
 
         http_client = DefaultHttpxClient(
             verify=self._build_ssl_context(),
@@ -95,7 +149,8 @@ class OpenAIWebSearchService:
         # complete, puis on degrade proprement pour rester compatible.
         try:
             return OpenAI(
-                api_key=self._config.openai_api_key,
+                api_key=api_key,
+                base_url=self._config.azure_foundry_endpoint,
                 http_client=http_client,
                 timeout=self._config.request_timeout,
                 max_retries=0,
@@ -103,31 +158,28 @@ class OpenAIWebSearchService:
         except TypeError:
             try:
                 return OpenAI(
-                    api_key=self._config.openai_api_key,
+                    api_key=api_key,
+                    base_url=self._config.azure_foundry_endpoint,
                     http_client=http_client,
                     timeout=self._config.request_timeout,
                 )
             except TypeError:
                 return OpenAI(
-                    api_key=self._config.openai_api_key,
+                    api_key=api_key,
+                    base_url=self._config.azure_foundry_endpoint,
                     http_client=http_client,
                 )
 
     def _build_request(self, company: CompanyRow, *, max_output_tokens: int) -> dict[str, Any]:
         user_prompt = build_company_search_prompt(company)
-        return {
-            "model": self._config.openai_model,
-            "input": [
-                {
-                    "role": "system",
-                    "content": [{"type": "input_text", "text": SYSTEM_PROMPT}],
-                },
-                {
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": user_prompt}],
-                },
-            ],
+        request: dict[str, Any] = {
+            "model": self._config.azure_foundry_model_deployment,
+            "instructions": SYSTEM_PROMPT,
+            "input": user_prompt,
             "tools": [{"type": "web_search"}],
+            "reasoning": {
+                "effort": self._config.azure_foundry_reasoning_effort,
+            },
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -136,21 +188,35 @@ class OpenAIWebSearchService:
                     "schema": RESULT_JSON_SCHEMA,
                 }
             },
-            "temperature": 0,
             "max_output_tokens": max_output_tokens,
         }
+        if self._config.search_audit_enabled:
+            request["include"] = ["web_search_call.action.sources"]
+        return request
 
     def _perform_request(self, request_payload: dict[str, Any]) -> Any:
         for attempt in Retrying(
             stop=stop_after_attempt(self._config.max_retries),
             wait=wait_fixed(self._config.retry_wait_seconds),
             before_sleep=before_sleep_log(self._logger, logging.WARNING),
+            retry=retry_if_exception(self._is_retryable_exception),
             reraise=True,
         ):
             with attempt:
                 return self._client.responses.create(**request_payload)
 
-        raise RuntimeError("Echec inattendu des retries OpenAI.")
+        raise RuntimeError("Echec inattendu des retries Azure Foundry.")
+
+    def _is_retryable_exception(self, exception: BaseException) -> bool:
+        from openai import APIConnectionError, APITimeoutError, RateLimitError
+
+        if isinstance(
+            exception,
+            APIConnectionError | APITimeoutError | RateLimitError,
+        ):
+            return True
+        status_code = getattr(exception, "status_code", None)
+        return isinstance(status_code, int) and status_code >= 500
 
     def _extract_text_response(self, response: Any) -> str:
         output_text = getattr(response, "output_text", None)
@@ -196,15 +262,92 @@ class OpenAIWebSearchService:
         parsed = try_parse_json(response_text)
         if parsed is None:
             self._logger.warning("Impossible de parser le JSON retourne par le modele.")
-            return CompanyResult.not_found()
+            raise ModelResponseError("JSON Azure Foundry impossible à parser.")
 
         try:
             result = CompanyResult.model_validate(parsed)
-        except Exception:
+        except Exception as exc:
             self._logger.warning("JSON present mais schema inexploitable : %s", parsed)
-            return CompanyResult.not_found()
+            raise ModelResponseError("Schéma JSON Azure Foundry inexploitable.") from exc
 
         return sanitize_result(result)
+
+    def _extract_web_search_sources(self, response: Any) -> list[str]:
+        payload = self._to_plain_data(response)
+        if not isinstance(payload, Mapping):
+            return []
+        output_items = payload.get("output")
+        if not isinstance(output_items, list):
+            return []
+
+        sources: list[str] = []
+        for item in output_items:
+            if not isinstance(item, Mapping):
+                continue
+            action = item.get("action")
+            if isinstance(action, Mapping):
+                self._collect_source_urls(action.get("sources"), sources)
+
+            content_items = item.get("content")
+            if not isinstance(content_items, list):
+                continue
+            for content in content_items:
+                if not isinstance(content, Mapping):
+                    continue
+                self._collect_source_urls(content.get("annotations"), sources)
+        return sources[:20]
+
+    def _apply_audit_evidence_policy(
+        self,
+        result: CompanyResult,
+        consulted_sources: list[str],
+    ) -> CompanyResult:
+        if not self._config.search_audit_enabled:
+            return result
+
+        payload = result.model_dump()
+        if not self._source_was_consulted(result.identity_source, consulted_sources):
+            payload["identity_verified"] = False
+            payload["identity_match_type"] = "none"
+            payload["identity_source"] = NOT_FOUND_LABEL
+
+        for value_field, source_field in (
+            ("email", "email_source"),
+            ("phone", "phone_source"),
+            ("website", "website_source"),
+        ):
+            source = getattr(result, source_field)
+            if not self._source_was_consulted(source, consulted_sources):
+                payload[value_field] = NOT_FOUND_LABEL
+                payload[source_field] = NOT_FOUND_LABEL
+
+        return CompanyResult.model_validate(payload)
+
+    def _source_was_consulted(self, source: str, consulted_sources: list[str]) -> bool:
+        if source == NOT_FOUND_LABEL:
+            return False
+        normalized_source = source.split("#", 1)[0].rstrip("/")
+        return any(candidate.split("#", 1)[0].rstrip("/") == normalized_source for candidate in consulted_sources)
+
+    def _read_response_string(self, payload: Any, key: str) -> str:
+        if not isinstance(payload, Mapping):
+            return ""
+        value = payload.get(key)
+        return value.strip() if isinstance(value, str) else ""
+
+    def _collect_source_urls(self, values: Any, destination: list[str]) -> None:
+        if not isinstance(values, list):
+            return
+        for value in values:
+            if not isinstance(value, Mapping):
+                continue
+            url = value.get("url")
+            if not isinstance(url, str):
+                citation = value.get("url_citation")
+                if isinstance(citation, Mapping):
+                    url = citation.get("url")
+            if isinstance(url, str) and url.strip() and url not in destination:
+                destination.append(url.strip())
 
     def _to_plain_data(self, value: Any) -> Any:
         if hasattr(value, "model_dump"):
@@ -222,13 +365,16 @@ class OpenAIWebSearchService:
     def _build_ssl_context(self) -> ssl.SSLContext:
         context = ssl.create_default_context()
 
-        if self._config.openai_ca_bundle is None:
+        if self._config.azure_foundry_ca_bundle is None:
             return context
 
-        ca_bundle_path = self._config.openai_ca_bundle.resolve()
+        ca_bundle_path = self._config.azure_foundry_ca_bundle.resolve()
         context.load_verify_locations(cafile=str(ca_bundle_path))
 
-        self._logger.info("Bundle CA personnalise charge pour OpenAI : %s", ca_bundle_path)
+        self._logger.info(
+            "Bundle CA personnalise charge pour Azure Foundry : %s",
+            ca_bundle_path,
+        )
         return context
 
     def _should_retry_for_max_output_tokens(self, response: Any) -> bool:

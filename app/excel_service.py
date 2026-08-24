@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,7 +12,7 @@ from openpyxl.cell import Cell
 from openpyxl.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from app.models import CompanyResult, CompanyRow
+from app.models import NOT_FOUND_LABEL, CompanyResult, CompanyRow, ProcessingStatus
 from app.utils import clean_cell_value, maybe_limit_rows
 
 
@@ -25,13 +26,32 @@ class ExcelColumns:
     email: int = 16
     phone: int = 17
     website: int = 18
+    status: int = 26
+    sources: int = 27
+    email_source: int = 28
+    phone_source: int = 29
+    website_source: int = 30
+    identity_source: int = 31
+    identity_match_type: int = 32
+    searched_at_utc: int = 33
+    model_deployment: int = 34
+    model_snapshot: int = 35
+    response_id: int = 36
 
 
 class ExcelService:
-    def __init__(self, file_path: Path, sheet_name: str | None, logger: Any) -> None:
+    def __init__(
+        self,
+        file_path: Path,
+        sheet_name: str | None,
+        logger: Any,
+        *,
+        audit_enabled: bool = False,
+    ) -> None:
         self.file_path = file_path
         self.sheet_name = sheet_name
         self.logger = logger
+        self.audit_enabled = audit_enabled
         self.columns = ExcelColumns()
         self._workbook: Workbook | None = None
         self._sheet: Worksheet | None = None
@@ -59,13 +79,12 @@ class ExcelService:
         else:
             self._sheet = self.workbook.active
 
+        self._ensure_result_headers()
         self.logger.info("Feuille selectionnee : %s", self.sheet.title)
 
     def create_backup(self) -> Path:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = self.file_path.with_name(
-            f"{self.file_path.stem}.backup.{timestamp}{self.file_path.suffix}"
-        )
+        backup_path = self.file_path.with_name(f"{self.file_path.stem}.backup.{timestamp}{self.file_path.suffix}")
         shutil.copy2(self.file_path, backup_path)
         self.logger.info("Backup cree : %s", backup_path)
         return backup_path
@@ -113,10 +132,152 @@ class ExcelService:
         )
         return all(value is not None and value != "" for value in values)
 
-    def write_result(self, row_index: int, result: CompanyResult) -> None:
-        self.sheet.cell(row=row_index, column=self.columns.email, value=result.email)
-        self.sheet.cell(row=row_index, column=self.columns.phone, value=result.phone)
-        self.sheet.cell(row=row_index, column=self.columns.website, value=result.website)
+    def write_result(
+        self,
+        row_index: int,
+        result: CompanyResult,
+        *,
+        overwrite_existing: bool = False,
+    ) -> None:
+        result_values = (
+            (self.columns.email, result.email, self.columns.email_source, result.email_source),
+            (self.columns.phone, result.phone, self.columns.phone_source, result.phone_source),
+            (self.columns.website, result.website, self.columns.website_source, result.website_source),
+        )
+        for column_index, value, source_column, source in result_values:
+            existing = self._read_text(row_index, column_index)
+            value_was_written = overwrite_existing or not existing or existing == NOT_FOUND_LABEL
+            if value_was_written:
+                self.sheet.cell(row=row_index, column=column_index, value=value)
+            if self.audit_enabled and (value_was_written or self._contact_values_match(column_index, existing, value)):
+                self._write_audit_value(
+                    row_index,
+                    source_column,
+                    source,
+                    overwrite_existing=overwrite_existing,
+                )
+
+        if not self.audit_enabled:
+            return
+
+        existing_sources = [] if overwrite_existing else self.read_sources(row_index)
+        merged_sources = list(dict.fromkeys([*existing_sources, *result.sources]))[:20]
+        if merged_sources or overwrite_existing:
+            self.sheet.cell(
+                row=row_index,
+                column=self.columns.sources,
+                value=json.dumps(merged_sources, ensure_ascii=False) if merged_sources else None,
+            )
+
+        audit_values = {
+            self.columns.identity_source: result.identity_source,
+            self.columns.identity_match_type: result.identity_match_type.value,
+            self.columns.searched_at_utc: (
+                result.searched_at_utc.isoformat() if result.searched_at_utc is not None else ""
+            ),
+            self.columns.model_deployment: result.model_deployment,
+            self.columns.model_snapshot: result.model_snapshot,
+            self.columns.response_id: result.response_id,
+        }
+        for column_index, value in audit_values.items():
+            self.sheet.cell(
+                row=row_index,
+                column=column_index,
+                value=None if value in ("", NOT_FOUND_LABEL) else value,
+            )
+
+    def read_status(self, row_index: int) -> ProcessingStatus | None:
+        value = self._read_text(row_index, self.columns.status)
+        if value is None:
+            return None
+        try:
+            return ProcessingStatus(value)
+        except ValueError:
+            return None
+
+    def write_status(self, row_index: int, status: ProcessingStatus) -> None:
+        self.sheet.cell(row=row_index, column=self.columns.status, value=status.value)
+
+    def read_sources(self, row_index: int) -> list[str]:
+        value = self.sheet.cell(row=row_index, column=self.columns.sources).value
+        if not isinstance(value, str) or not value.strip():
+            return []
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return [source.strip() for source in value.splitlines() if source.strip()]
+        if not isinstance(parsed, list):
+            return []
+        return [str(source).strip() for source in parsed if str(source).strip()]
+
+    def has_any_contact(self, row_index: int) -> bool:
+        values = (
+            self._read_text(row_index, self.columns.email),
+            self._read_text(row_index, self.columns.phone),
+            self._read_text(row_index, self.columns.website),
+        )
+        return any(value not in (None, "", NOT_FOUND_LABEL) for value in values)
+
+    def _ensure_result_headers(self) -> None:
+        headers = {
+            self.columns.email: "Email",
+            self.columns.phone: "Telephone",
+            self.columns.website: "Site Web",
+            self.columns.status: "Enrichment Status",
+        }
+        if self.audit_enabled:
+            headers.update(
+                {
+                    self.columns.sources: "Enrichment Sources",
+                    self.columns.email_source: "Email Source",
+                    self.columns.phone_source: "Telephone Source",
+                    self.columns.website_source: "Site Web Source",
+                    self.columns.identity_source: "Identity Source",
+                    self.columns.identity_match_type: "Identity Match Type",
+                    self.columns.searched_at_utc: "Search Timestamp UTC",
+                    self.columns.model_deployment: "Model Deployment",
+                    self.columns.model_snapshot: "Model Snapshot",
+                    self.columns.response_id: "Azure Response ID",
+                }
+            )
+        for column_index, header in headers.items():
+            cell = self.sheet.cell(row=1, column=column_index)
+            if cell.value is None:
+                cell.value = header
+
+    def _write_audit_value(
+        self,
+        row_index: int,
+        column_index: int,
+        value: str,
+        *,
+        overwrite_existing: bool,
+    ) -> None:
+        existing = self._read_text(row_index, column_index)
+        if overwrite_existing or not existing:
+            self.sheet.cell(
+                row=row_index,
+                column=column_index,
+                value=None if value == NOT_FOUND_LABEL else value,
+            )
+
+    def _contact_values_match(
+        self,
+        column_index: int,
+        existing: str | None,
+        candidate: str,
+    ) -> bool:
+        if not existing or candidate == NOT_FOUND_LABEL:
+            return False
+        if column_index == self.columns.email:
+            return existing.casefold() == candidate.casefold()
+        if column_index == self.columns.phone:
+            existing_digits = "".join(character for character in existing if character.isdigit())
+            candidate_digits = "".join(character for character in candidate if character.isdigit())
+            return existing_digits == candidate_digits
+        if column_index == self.columns.website:
+            return existing.casefold().rstrip("/") == candidate.casefold().rstrip("/")
+        return existing == candidate
 
     def _read_text(self, row_index: int, column_index: int) -> str | None:
         cell = self.sheet.cell(row=row_index, column=column_index)
