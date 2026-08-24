@@ -1,0 +1,5 @@
+.env
+logs/
+data/
+.venv/
+Zscaler Root CA.crt

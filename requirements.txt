@@ -1,0 +1,5 @@
+openai
+openpyxl
+pydantic
+python-dotenv
+tenacity
