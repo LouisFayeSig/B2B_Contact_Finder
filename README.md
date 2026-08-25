@@ -1,6 +1,6 @@
 # Enrichissement Excel d'entreprises via Microsoft Foundry
 
-Ce projet enrichit un fichier Excel d'entreprises en recherchant sur internet, via un deploiement Azure OpenAI dans Microsoft Foundry avec l'outil `web_search`, un email, un telephone et un site web. Chaque ligne conserve un statut de traitement. La collecte des sources web est facultative.
+Ce projet enrichit un fichier Excel d'entreprises en recherchant sur internet, via un deploiement Azure OpenAI dans Microsoft Foundry avec l'outil `web_search`, un email, un telephone et un site web. Une seconde passe deterministe complete les champs oublies depuis le site ou le profil trouve. Chaque ligne conserve un statut de traitement. La collecte des sources web est facultative.
 
 Le pipeline lit un classeur existant, traite les lignes par batch, ecrit les resultats directement dans le fichier source, puis sauvegarde apres chaque batch. Si une information n'est pas trouvee ou reste trop incertaine, la valeur ecrite est exactement `Non trouvé`.
 
@@ -46,6 +46,10 @@ AZURE_FOUNDRY_REASONING_EFFORT=none
 AZURE_FOUNDRY_CA_BUNDLE=Zscaler Root CA.crt
 WEB_SEARCH_CONTEXT_SIZE=default
 SEARCH_AUDIT_ENABLED=false
+SITE_EXTRACTION_ENABLED=true
+SITE_EXTRACTION_MAX_PAGES=6
+SITE_EXTRACTION_TIMEOUT=12
+SITE_EXTRACTION_MAX_BYTES=2000000
 MAX_WORKERS=4
 PROCESSING_JOURNAL_PATH=logs/enrichment.pending.jsonl
 REQUEST_TIMEOUT=90
@@ -87,8 +91,14 @@ Colonnes cibles ecrites :
 - `AL` (38) = Tokens de sortie
 - `AM` (39) = Total de tokens
 - `AN` (40) = Nombre d'appels de recherche web
+- `AO` (41) = Pages lues par l'extracteur deterministe
+- `AP` (42) = Nombre de champs completes sans nouvel appel au modele
+- `AQ` (43) = Methode d'extraction de l'email
+- `AR` (44) = Methode d'extraction du telephone
+- `AS` (45) = Methode de verification d'identite
+- `AT` (46) = Presence d'un pop-up de mentions legales dynamique
 
-Les colonnes `AA:AN` ne sont creees et renseignees que lorsque l'audit est active.
+Les colonnes `AA:AT` ne sont creees et renseignees que lorsque l'audit est active.
 
 Les entetes sont en ligne 1 et les donnees commencent en ligne 2.
 
@@ -108,6 +118,8 @@ python -m app.main --max-rows 10 --batch-size 5
 python -m app.main --start-row 2 --max-rows 50 --batch-size 10
 python -m app.main --start-row 12 --max-rows 100 --batch-size 20 --workers 4 --audit
 python -m app.main --search-context-size low --audit
+python -m app.main --site-extraction
+python -m app.main --no-site-extraction
 python -m app.main --no-audit --workers 1
 python -m app.main --overwrite-existing
 python -m app.main --no-skip-if-filled
@@ -122,9 +134,10 @@ python -m app.main --no-skip-if-filled
 5. Application des regles de statut, `OVERWRITE_EXISTING` puis `SKIP_IF_FILLED`.
 6. Recherches web en parallele via la Responses API du deploiement Microsoft Foundry, dans la limite de `MAX_WORKERS`.
 7. Verification de l'identite, parsing JSON et validation des coordonnees.
-8. Lorsque l'audit est active, controle que chaque preuve cite une page reellement consultee.
-9. Ecriture sequentielle et non destructive dans Excel, avec journalisation durable avant chaque modification.
-10. Sauvegarde du meme fichier a la fin de chaque batch si `SAVE_EVERY_BATCH=true`, puis purge du journal confirme.
+8. Si un email ou telephone manque mais qu'un site ou profil a ete trouve, lecture directe de la page puis, si necessaire, des liens contact et mentions legales du meme domaine.
+9. Lorsque l'audit est active, controle que chaque preuve cite une page reellement consultee.
+10. Ecriture sequentielle et non destructive dans Excel, avec journalisation durable avant chaque modification.
+11. Sauvegarde du meme fichier a la fin de chaque batch si `SAVE_EVERY_BATCH=true`, puis purge du journal confirme.
 
 ## Regles metier
 
@@ -138,6 +151,14 @@ python -m app.main --no-skip-if-filled
 - Un resultat valide mais vide devient `not_found`.
 - Les emails, telephones et URL invalides sont normalises en `Non trouvé` avant ecriture.
 - Sans `OVERWRITE_EXISTING`, seules les cellules vides ou egales a `Non trouvé` sont completees ; les contacts existants sont preserves.
+- La recherche LLM reste generaliste : un site officiel, Google Maps, un annuaire, une annonce ou un profil professionnel peuvent etre retenus.
+- L'extracteur direct ne remplace jamais une coordonnee deja trouvee par le modele.
+- Il reconnait les liens `mailto:` et `tel:`, le texte visible et les donnees JSON-LD. Les numeros francais sont normalises au format `0X XX XX XX XX`.
+- Un email inverse utilise comme protection anti-robot est remis dans le bon sens lorsqu'il forme ensuite une adresse valide.
+- Les pages contact ou mentions legales ne sont suivies que sur le meme domaine et dans la limite configuree.
+- Une concordance SIRET ou SIREN dans les mentions legales renforce la preuve d'identite. Un identifiant contradictoire proche du nom de l'entreprise bloque les contacts de la page.
+- Les pop-ups legaux charges uniquement par JavaScript sont signales dans l'audit ; aucun navigateur headless couteux n'est lance par defaut.
+- Les URL locales, privees, avec identifiants ou ports inhabituels sont refusees avant telechargement.
 
 ## Skip et overwrite
 
@@ -253,6 +274,21 @@ Le benchmark mesure l'usage renvoye par Azure, mais ne pretend pas recalculer la
 facture : les tarifs et les noms de compteurs Azure peuvent differer de ceux de
 l'API OpenAI directe. Comparer le rapport au cout observe dans Azure Cost
 Management sur la meme fenetre d'execution.
+
+## Benchmark gratuit de l'extraction directe
+
+Ce benchmark relit uniquement les lignes existantes qui possedent deja un site
+mais auxquelles il manque un email ou un telephone. Il n'appelle pas Azure et ne
+modifie pas le classeur :
+
+```bash
+poetry run python -m app.site_benchmark --max-rows 30 --workers 4
+```
+
+Il produit dans `benchmarks/` un CSV detaille et un JSON indiquant notamment les
+emails et telephones recuperes, les pages consultees, les preuves SIRET/SIREN,
+les pop-ups legaux detectes et la latence. Les nouvelles valeurs doivent etre
+controlees sur l'URL source avant de servir de reference qualite.
 
 ## Certificat entreprise / Zscaler
 

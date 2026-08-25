@@ -28,7 +28,6 @@ _MISSING_TOKENS = {
     "non trouvé",
 }
 _EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
-_PHONE_PATTERN = re.compile(r"^[+()\d\s./-]+$")
 
 
 class ProcessingStatus(StrEnum):
@@ -78,7 +77,7 @@ class CompanyResult(BaseModel):
     email: str = Field(default=NOT_FOUND_LABEL)
     phone: str = Field(default=NOT_FOUND_LABEL)
     website: str = Field(default=NOT_FOUND_LABEL)
-    sources: list[str] = Field(default_factory=list, max_length=20)
+    sources: list[str] = Field(default_factory=list, max_length=30)
     email_source: str = Field(default=NOT_FOUND_LABEL)
     phone_source: str = Field(default=NOT_FOUND_LABEL)
     website_source: str = Field(default=NOT_FOUND_LABEL)
@@ -93,31 +92,22 @@ class CompanyResult(BaseModel):
     output_tokens: int = Field(default=0, ge=0)
     total_tokens: int = Field(default=0, ge=0)
     web_search_calls: int = Field(default=0, ge=0)
+    deterministic_pages: list[str] = Field(default_factory=list, max_length=12)
+    deterministic_fields_found: int = Field(default=0, ge=0, le=3)
+    email_extraction_method: str = ""
+    phone_extraction_method: str = ""
+    identity_extraction_method: str = ""
+    legal_popup_detected: bool = False
 
     @field_validator("email", mode="before")
     @classmethod
     def validate_email(cls, value: Any) -> str:
-        text = _normalize_text(value)
-        if text == NOT_FOUND_LABEL:
-            return text
-        if text.lower().startswith("mailto:"):
-            text = text[7:].strip()
-        if len(text) > 254 or _EMAIL_PATTERN.fullmatch(text) is None:
-            return NOT_FOUND_LABEL
-        return text
+        return normalize_email(value)
 
     @field_validator("phone", mode="before")
     @classmethod
     def validate_phone(cls, value: Any) -> str:
-        text = _normalize_text(value)
-        if text == NOT_FOUND_LABEL:
-            return text
-        if text.lower().startswith("tel:"):
-            text = text[4:].strip()
-        digit_count = sum(character.isdigit() for character in text)
-        if not 7 <= digit_count <= 15 or _PHONE_PATTERN.fullmatch(text) is None:
-            return NOT_FOUND_LABEL
-        return text
+        return normalize_fr_phone(value)
 
     @field_validator("website", mode="before")
     @classmethod
@@ -140,9 +130,24 @@ class CompanyResult(BaseModel):
             source = _normalize_http_url(raw_source)
             if source != NOT_FOUND_LABEL and source not in sources:
                 sources.append(source)
-            if len(sources) == 20:
+            if len(sources) == 30:
                 break
         return sources
+
+    @field_validator("deterministic_pages", mode="before")
+    @classmethod
+    def validate_deterministic_pages(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        raw_pages = [value] if isinstance(value, str) else list(value) if isinstance(value, list | tuple | set) else []
+        pages: list[str] = []
+        for raw_page in raw_pages:
+            page = _normalize_http_url(raw_page)
+            if page != NOT_FOUND_LABEL and page not in pages:
+                pages.append(page)
+            if len(pages) == 12:
+                break
+        return pages
 
     @field_validator(
         "email_source",
@@ -166,6 +171,8 @@ class CompanyResult(BaseModel):
             self.email_source = NOT_FOUND_LABEL
             self.phone_source = NOT_FOUND_LABEL
             self.website_source = NOT_FOUND_LABEL
+            self.email_extraction_method = ""
+            self.phone_extraction_method = ""
 
         for value_field, source_field in (
             ("email", "email_source"),
@@ -174,6 +181,9 @@ class CompanyResult(BaseModel):
         ):
             if getattr(self, value_field) == NOT_FOUND_LABEL:
                 setattr(self, source_field, NOT_FOUND_LABEL)
+                method_field = f"{value_field}_extraction_method"
+                if hasattr(self, method_field):
+                    setattr(self, method_field, "")
         return self
 
     @property
@@ -215,6 +225,43 @@ def _normalize_text(value: Any) -> str:
     if text.lower() in _MISSING_TOKENS:
         return NOT_FOUND_LABEL
     return text
+
+
+def normalize_email(value: Any) -> str:
+    text = _normalize_text(value)
+    if text == NOT_FOUND_LABEL:
+        return text
+    if text.lower().startswith("mailto:"):
+        text = text[7:].strip()
+    text = text.strip(" <>[](){}.,;:\"'").casefold()
+    if len(text) > 254 or _EMAIL_PATTERN.fullmatch(text) is None:
+        return NOT_FOUND_LABEL
+    local_part, domain = text.rsplit("@", 1)
+    if len(local_part) > 64 or ".." in text or domain.startswith("-") or domain.endswith("-"):
+        return NOT_FOUND_LABEL
+    return text
+
+
+def normalize_fr_phone(value: Any) -> str:
+    text = _normalize_text(value)
+    if text == NOT_FOUND_LABEL:
+        return text
+    if text.lower().startswith("tel:"):
+        text = text[4:].strip()
+    text = re.split(r"(?i)\b(?:poste|post|ext|extension)\b", text, maxsplit=1)[0]
+    compact = re.sub(r"[^+\d]", "", text)
+    if compact.startswith("0033"):
+        compact = f"+33{compact[4:]}"
+    if compact.startswith("+330"):
+        compact = f"+33{compact[4:]}"
+    if compact.startswith("+33"):
+        national = compact[3:]
+        if len(national) != 9 or national[0] == "0":
+            return NOT_FOUND_LABEL
+        compact = f"0{national}"
+    if len(compact) != 10 or not compact.isdigit() or compact[0] != "0" or compact[1] == "0":
+        return NOT_FOUND_LABEL
+    return " ".join((compact[:2], compact[2:4], compact[4:6], compact[6:8], compact[8:10]))
 
 
 def _normalize_http_url(value: Any) -> str:

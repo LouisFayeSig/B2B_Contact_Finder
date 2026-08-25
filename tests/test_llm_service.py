@@ -18,6 +18,7 @@ class AzureFoundryWebSearchServiceTests(unittest.TestCase):
             azure_foundry_reasoning_effort="none",
             web_search_context_size="default",
             search_audit_enabled=True,
+            site_extraction_enabled=False,
         )
         self.company = CompanyRow(
             row_index=2,
@@ -31,6 +32,7 @@ class AzureFoundryWebSearchServiceTests(unittest.TestCase):
         self.assertEqual(request["include"], ["web_search_call.action.sources"])
         self.assertEqual(request["tools"], [{"type": "web_search"}])
         self.assertEqual(request["reasoning"], {"effort": "none"})
+        self.assertEqual(request["tool_choice"], "required")
         self.assertIsInstance(request["input"], str)
         self.assertIn("Entreprise Test", request["input"])
         self.assertIn("instructions", request)
@@ -110,6 +112,46 @@ class AzureFoundryWebSearchServiceTests(unittest.TestCase):
             result = self.service.search_company_contact(self.company)
 
         self.assertEqual(result.sources, [])
+
+    def test_audit_accepts_a_page_fetched_by_deterministic_extraction(self) -> None:
+        self.service._config.site_extraction_enabled = True
+
+        class SiteExtractorStub:
+            def enrich(self, company: CompanyRow, result: CompanyResult) -> CompanyResult:
+                payload = result.model_dump()
+                payload.update(
+                    {
+                        "phone": "01 23 45 67 89",
+                        "phone_source": "https://example.com/contact",
+                        "phone_extraction_method": "tel_link",
+                        "deterministic_pages": ["https://example.com/contact"],
+                        "deterministic_fields_found": 1,
+                        "sources": [*result.sources, "https://example.com/contact"],
+                    }
+                )
+                return CompanyResult.model_validate(payload)
+
+        self.service._site_extractor = SiteExtractorStub()
+        response = {
+            "output_text": (
+                '{"email":"Non trouvé","phone":"Non trouvé","website":"https://example.com",'
+                '"email_source":"Non trouvé","phone_source":"Non trouvé",'
+                '"website_source":"https://example.com","identity_verified":true,'
+                '"identity_match_type":"siret","identity_source":"https://example.com"}'
+            ),
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "action": {"sources": [{"type": "url", "url": "https://example.com"}]},
+                }
+            ],
+        }
+
+        with patch.object(self.service, "_request_with_token_retry", return_value=response):
+            result = self.service.search_company_contact(self.company)
+
+        self.assertEqual(result.phone, "01 23 45 67 89")
+        self.assertIn("https://example.com/contact", result.sources)
 
     def test_invalid_json_raises_recoverable_processing_error(self) -> None:
         with self.assertRaises(ModelResponseError):

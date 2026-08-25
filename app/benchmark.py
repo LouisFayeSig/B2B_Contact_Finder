@@ -62,6 +62,12 @@ def parse_args() -> argparse.Namespace:
         help="Applique la validation stricte des sources pendant le benchmark.",
     )
     parser.add_argument(
+        "--site-extraction",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Active la seconde passe deterministe sur le site trouve.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("benchmarks"),
@@ -89,14 +95,16 @@ def main() -> int:
                 azure_foundry_model_deployment=deployment,
                 web_search_context_size=args.search_context_size,
                 search_audit_enabled=bool(args.audit),
+                site_extraction_enabled=bool(args.site_extraction),
             )
             config.validate()
             logger.info(
-                "Benchmark %s : %s ligne(s), contexte=%s, audit=%s.",
+                "Benchmark %s : %s ligne(s), contexte=%s, audit=%s, extraction_site=%s.",
                 deployment,
                 len(references),
                 config.web_search_context_size,
                 config.search_audit_enabled,
+                config.site_extraction_enabled,
             )
             all_rows.extend(_run_deployment(config, references, logger))
 
@@ -229,6 +237,12 @@ def _build_benchmark_row(
             "output_tokens": result.output_tokens,
             "total_tokens": result.total_tokens,
             "web_search_calls": result.web_search_calls,
+            "deterministic_pages": json.dumps(result.deterministic_pages, ensure_ascii=False),
+            "deterministic_fields_found": result.deterministic_fields_found,
+            "email_extraction_method": result.email_extraction_method,
+            "phone_extraction_method": result.phone_extraction_method,
+            "identity_extraction_method": result.identity_extraction_method,
+            "legal_popup_detected": result.legal_popup_detected,
             "latency_seconds": round(latency_seconds, 3),
             "error_type": "",
             "error_message": "",
@@ -262,6 +276,12 @@ def _build_error_row(
             "output_tokens": 0,
             "total_tokens": 0,
             "web_search_calls": 0,
+            "deterministic_pages": "[]",
+            "deterministic_fields_found": 0,
+            "email_extraction_method": "",
+            "phone_extraction_method": "",
+            "identity_extraction_method": "",
+            "legal_popup_detected": False,
             "latency_seconds": 0.0,
             "error_type": type(error).__name__,
             "error_message": str(error)[:500],
@@ -275,6 +295,7 @@ def _base_row(config: AppConfig, reference: BenchmarkReference) -> dict[str, Any
         "deployment": config.azure_foundry_model_deployment,
         "search_context_size": config.web_search_context_size,
         "audit_enabled": config.search_audit_enabled,
+        "site_extraction_enabled": config.site_extraction_enabled,
         "row_index": reference.company.row_index,
         "siret": reference.company.normalized_siret,
         "company_name": reference.company.company_name,
@@ -323,6 +344,12 @@ def summarize_benchmark_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "output_tokens": sum(int(row["output_tokens"]) for row in completed_rows),
             "total_tokens": sum(int(row["total_tokens"]) for row in completed_rows),
             "web_search_calls": sum(int(row["web_search_calls"]) for row in completed_rows),
+            "deterministic_fields_found": sum(
+                int(row.get("deterministic_fields_found", 0)) for row in completed_rows
+            ),
+            "rows_with_deterministic_gain": sum(
+                int(row.get("deterministic_fields_found", 0)) > 0 for row in completed_rows
+            ),
             "average_latency_seconds": round(
                 sum(float(row["latency_seconds"]) for row in completed_rows) / len(completed_rows),
                 3,

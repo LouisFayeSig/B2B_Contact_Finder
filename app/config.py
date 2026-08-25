@@ -37,6 +37,10 @@ class AppConfig:
     azure_foundry_ca_bundle: Path | None
     log_file_path: Path
     journal_file_path: Path
+    site_extraction_enabled: bool = True
+    site_extraction_max_pages: int = 6
+    site_extraction_timeout: float = 12.0
+    site_extraction_max_bytes: int = 2_000_000
 
     @classmethod
     def from_env(cls) -> AppConfig:
@@ -75,6 +79,10 @@ class AppConfig:
                     "logs/enrichment.pending.jsonl",
                 )
             ).expanduser(),
+            site_extraction_enabled=parse_bool(os.getenv("SITE_EXTRACTION_ENABLED"), default=True),
+            site_extraction_max_pages=_env_int("SITE_EXTRACTION_MAX_PAGES", 6),
+            site_extraction_timeout=_env_float("SITE_EXTRACTION_TIMEOUT", 12.0),
+            site_extraction_max_bytes=_env_int("SITE_EXTRACTION_MAX_BYTES", 2_000_000),
         )
         config.validate()
         return config
@@ -105,6 +113,8 @@ class AppConfig:
                 updated,
                 web_search_context_size=str(args.search_context_size).strip().lower(),
             )
+        if getattr(args, "site_extraction", None) is not None:
+            updated = replace(updated, site_extraction_enabled=bool(args.site_extraction))
 
         updated.validate()
         return updated
@@ -143,6 +153,12 @@ class AppConfig:
             raise ValueError("AZURE_FOUNDRY_REASONING_EFFORT doit valoir none, low, medium, high, xhigh ou max.")
         if self.web_search_context_size not in {"default", "low", "medium", "high"}:
             raise ValueError("WEB_SEARCH_CONTEXT_SIZE doit valoir default, low, medium ou high.")
+        if not 1 <= self.site_extraction_max_pages <= 12:
+            raise ValueError("SITE_EXTRACTION_MAX_PAGES doit etre compris entre 1 et 12.")
+        if self.site_extraction_timeout <= 0:
+            raise ValueError("SITE_EXTRACTION_TIMEOUT doit etre > 0.")
+        if not 100_000 <= self.site_extraction_max_bytes <= 10_000_000:
+            raise ValueError("SITE_EXTRACTION_MAX_BYTES doit etre compris entre 100000 et 10000000.")
         if self.input_excel_path.suffix.lower() != ".xlsx":
             raise ValueError("INPUT_EXCEL_PATH doit pointer vers un fichier .xlsx.")
         if self.azure_foundry_ca_bundle is not None and not self.azure_foundry_ca_bundle.exists():

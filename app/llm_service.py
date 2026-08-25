@@ -18,6 +18,7 @@ from tenacity import (
 from app.config import AppConfig
 from app.models import NOT_FOUND_LABEL, CompanyResult, CompanyRow
 from app.prompts import SYSTEM_PROMPT, build_company_search_prompt
+from app.site_extractor import DeterministicSiteExtractor
 from app.utils import sanitize_result, try_parse_json
 
 if TYPE_CHECKING:
@@ -67,10 +68,17 @@ RETRY_MAX_OUTPUT_TOKENS = 1200
 
 
 class AzureFoundryWebSearchService:
-    def __init__(self, config: AppConfig, logger: Any) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        logger: Any,
+        *,
+        site_extractor: DeterministicSiteExtractor | None = None,
+    ) -> None:
         self._config = config
         self._logger = logger
         self._client = self._build_client()
+        self._site_extractor = site_extractor or DeterministicSiteExtractor(config, logger)
 
     def search_company_contact(self, company: CompanyRow) -> CompanyResult:
         response = self._request_with_token_retry(company)
@@ -86,7 +94,21 @@ class AzureFoundryWebSearchService:
 
         result = self._parse_json_response(response_text)
         sources = self._extract_web_search_sources(response) if self._config.search_audit_enabled else []
-        result = self._apply_audit_evidence_policy(result, sources)
+        result = self._attach_sources(result, sources)
+        result = self._mark_llm_extraction_methods(result)
+
+        site_extractor = getattr(self, "_site_extractor", None)
+        if self._config.site_extraction_enabled and site_extractor is not None:
+            try:
+                result = site_extractor.enrich(company, result)
+            except Exception as exc:
+                self._logger.warning(
+                    "Ligne %s : extraction directe du site ignoree apres erreur : %s",
+                    company.row_index,
+                    exc,
+                )
+        consulted_sources = list(dict.fromkeys([*sources, *result.deterministic_pages]))
+        result = self._apply_audit_evidence_policy(result, consulted_sources)
 
         response_payload = self._to_plain_data(response)
         response_id = self._read_response_string(response_payload, "id")
@@ -95,7 +117,7 @@ class AzureFoundryWebSearchService:
         return sanitize_result(
             {
                 **result.model_dump(),
-                "sources": sources,
+                "sources": result.sources,
                 "searched_at_utc": datetime.now(UTC),
                 "model_deployment": self._config.azure_foundry_model_deployment,
                 "model_snapshot": model_snapshot,
@@ -183,6 +205,7 @@ class AzureFoundryWebSearchService:
             "instructions": SYSTEM_PROMPT,
             "input": user_prompt,
             "tools": [web_search_tool],
+            "tool_choice": "required",
             "reasoning": {
                 "effort": self._config.azure_foundry_reasoning_effort,
             },
@@ -199,6 +222,23 @@ class AzureFoundryWebSearchService:
         if self._config.search_audit_enabled:
             request["include"] = ["web_search_call.action.sources"]
         return request
+
+    def _mark_llm_extraction_methods(self, result: CompanyResult) -> CompanyResult:
+        payload = result.model_dump()
+        if result.email != NOT_FOUND_LABEL:
+            payload["email_extraction_method"] = "llm_web_search"
+        if result.phone != NOT_FOUND_LABEL:
+            payload["phone_extraction_method"] = "llm_web_search"
+        if result.identity_verified:
+            payload["identity_extraction_method"] = "llm_web_search"
+        return CompanyResult.model_validate(payload)
+
+    def _attach_sources(self, result: CompanyResult, sources: list[str]) -> CompanyResult:
+        if not sources:
+            return result
+        payload = result.model_dump()
+        payload["sources"] = sources
+        return CompanyResult.model_validate(payload)
 
     def _perform_request(self, request_payload: dict[str, Any]) -> Any:
         for attempt in Retrying(

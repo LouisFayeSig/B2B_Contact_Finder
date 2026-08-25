@@ -41,6 +41,13 @@ def parse_args() -> argparse.Namespace:
         help="Volume de contexte retourne par la recherche web.",
     )
     parser.add_argument(
+        "--site-extraction",
+        dest="site_extraction",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Complete les champs manquants par extraction directe du site trouve.",
+    )
+    parser.add_argument(
         "--skip-if-filled",
         dest="skip_if_filled",
         action=argparse.BooleanOptionalAction,

@@ -16,7 +16,7 @@ class CompanyResultTests(unittest.TestCase):
         )
 
         self.assertEqual(result.email, "contact@example.com")
-        self.assertEqual(result.phone, "+33 1 23 45 67 89")
+        self.assertEqual(result.phone, "01 23 45 67 89")
         self.assertEqual(result.website, "https://example.com/contact")
         self.assertFalse(result.is_not_found)
 

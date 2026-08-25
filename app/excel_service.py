@@ -41,6 +41,12 @@ class ExcelColumns:
     output_tokens: int = 38
     total_tokens: int = 39
     web_search_calls: int = 40
+    deterministic_pages: int = 41
+    deterministic_fields_found: int = 42
+    email_extraction_method: int = 43
+    phone_extraction_method: int = 44
+    identity_extraction_method: int = 45
+    legal_popup_detected: int = 46
 
 
 class ExcelService:
@@ -165,7 +171,7 @@ class ExcelService:
             return
 
         existing_sources = [] if overwrite_existing else self.read_sources(row_index)
-        merged_sources = list(dict.fromkeys([*existing_sources, *result.sources]))[:20]
+        merged_sources = list(dict.fromkeys([*existing_sources, *result.sources]))[:30]
         if merged_sources or overwrite_existing:
             self.sheet.cell(
                 row=row_index,
@@ -186,6 +192,12 @@ class ExcelService:
             self.columns.output_tokens: result.output_tokens,
             self.columns.total_tokens: result.total_tokens,
             self.columns.web_search_calls: result.web_search_calls,
+            self.columns.deterministic_pages: json.dumps(result.deterministic_pages, ensure_ascii=False),
+            self.columns.deterministic_fields_found: result.deterministic_fields_found,
+            self.columns.email_extraction_method: result.email_extraction_method,
+            self.columns.phone_extraction_method: result.phone_extraction_method,
+            self.columns.identity_extraction_method: result.identity_extraction_method,
+            self.columns.legal_popup_detected: result.legal_popup_detected,
         }
         for column_index, audit_value in audit_values.items():
             self.sheet.cell(
@@ -257,6 +269,12 @@ class ExcelService:
                     self.columns.output_tokens: "Output Tokens",
                     self.columns.total_tokens: "Total Tokens",
                     self.columns.web_search_calls: "Web Search Calls",
+                    self.columns.deterministic_pages: "Deterministic Pages",
+                    self.columns.deterministic_fields_found: "Deterministic Fields Found",
+                    self.columns.email_extraction_method: "Email Extraction Method",
+                    self.columns.phone_extraction_method: "Telephone Extraction Method",
+                    self.columns.identity_extraction_method: "Identity Extraction Method",
+                    self.columns.legal_popup_detected: "Legal Popup Detected",
                 }
             )
         for column_index, header in headers.items():
