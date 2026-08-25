@@ -7,6 +7,7 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
+from app.excel_columns import resolve_excel_columns
 from app.excel_service import ExcelService
 from app.models import NOT_FOUND_LABEL, CompanyResult, ProcessingStatus
 
@@ -158,6 +159,31 @@ class ExcelServiceTests(unittest.TestCase):
             self.service.sheet.cell(row=2, column=self.service.columns.total_tokens).value,
             165,
         )
+
+    def test_read_company_row_uses_resolved_columns(self) -> None:
+        headers = {
+            1: "VILLE",
+            2: "raison_sociale",
+            4: "siret",
+            6: "CODE POSTAL",
+            8: "Adresse",
+        }
+        for column_index, header in headers.items():
+            self.service.sheet.cell(row=1, column=column_index, value=header)
+        self.service.sheet.cell(row=2, column=1, value="Nantes")
+        self.service.sheet.cell(row=2, column=2, value="Entreprise Test")
+        self.service.sheet.cell(row=2, column=4, value="12345678901234")
+        self.service.sheet.cell(row=2, column=6, value=44000)
+        self.service.sheet.cell(row=2, column=8, value="1 rue du Test")
+        self.service.columns = resolve_excel_columns(self.service.sheet)
+
+        company = self.service.read_company_row(2)
+
+        self.assertEqual(company.siret, "12345678901234")
+        self.assertEqual(company.company_name, "Entreprise Test")
+        self.assertEqual(company.address, "1 rue du Test")
+        self.assertEqual(company.postal_code, "44000")
+        self.assertEqual(company.city, "Nantes")
 
 
 if __name__ == "__main__":

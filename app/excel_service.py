@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,41 +11,9 @@ from openpyxl.cell import Cell
 from openpyxl.workbook import Workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
+from app.excel_columns import ExcelColumns, resolve_excel_columns
 from app.models import NOT_FOUND_LABEL, CompanyResult, CompanyRow, ProcessingStatus
 from app.utils import clean_cell_value, maybe_limit_rows
-
-
-@dataclass(frozen=True, slots=True)
-class ExcelColumns:
-    siret: int = 3
-    company_name: int = 4
-    address: int = 7
-    postal_code: int = 8
-    city: int = 9
-    email: int = 16
-    phone: int = 17
-    website: int = 18
-    status: int = 26
-    sources: int = 27
-    email_source: int = 28
-    phone_source: int = 29
-    website_source: int = 30
-    identity_source: int = 31
-    identity_match_type: int = 32
-    searched_at_utc: int = 33
-    model_deployment: int = 34
-    model_snapshot: int = 35
-    response_id: int = 36
-    input_tokens: int = 37
-    output_tokens: int = 38
-    total_tokens: int = 39
-    web_search_calls: int = 40
-    deterministic_pages: int = 41
-    deterministic_fields_found: int = 42
-    email_extraction_method: int = 43
-    phone_extraction_method: int = 44
-    identity_extraction_method: int = 45
-    legal_popup_detected: int = 46
 
 
 class ExcelService:
@@ -62,7 +29,7 @@ class ExcelService:
         self.sheet_name = sheet_name
         self.logger = logger
         self.audit_enabled = audit_enabled
-        self.columns = ExcelColumns()
+        self.columns = ExcelColumns.legacy()
         self._workbook: Workbook | None = None
         self._sheet: Worksheet | None = None
 
@@ -89,6 +56,7 @@ class ExcelService:
         else:
             self._sheet = self.workbook.active
 
+        self.columns = resolve_excel_columns(self.sheet)
         self._ensure_result_headers()
         self.logger.info("Feuille selectionnee : %s", self.sheet.title)
 
@@ -316,7 +284,9 @@ class ExcelService:
             return existing.casefold().rstrip("/") == candidate.casefold().rstrip("/")
         return existing == candidate
 
-    def _read_text(self, row_index: int, column_index: int) -> str | None:
+    def _read_text(self, row_index: int, column_index: int | None) -> str | None:
+        if column_index is None:
+            return None
         cell = self.sheet.cell(row=row_index, column=column_index)
         return self._cell_to_text(cell)
 

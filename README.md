@@ -32,66 +32,41 @@ Renseigner le fichier `.env`
 
 ## Colonnes Excel
 
-Colonnes source lues :
+Les entetes sont en ligne 1 et les donnees commencent en ligne 2. Leur ordre, leur casse, leurs
+accents et les separateurs (`_`, `-`, espaces) n'ont pas d'importance.
 
-- `C` (3) = SIRET
-- `D` (4) = Raison sociale
-- `G` (7) = Adresse
-- `H` (8) = Code postal
-- `I` (9) = Ville
+Les deux champs obligatoires sont `SIRET` et `Raison sociale`. Les variantes usuelles sont
+acceptees, par exemple `siret`, `numero_siret`, `RAISON SOCIALE`, `denomination_sociale` ou
+`nom_entreprise`. `Adresse`, `Code postal` et `Ville` sont facultatifs et disposent egalement
+d'alias (`adresse_officielle`, `CP`, `commune`, etc.).
 
-Colonnes cibles ecrites :
-
-- `P` (16) = Email
-- `Q` (17) = Telephone
-- `R` (18) = Site Web
-- `Z` (26) = Statut (`success`, `not_found`, `technical_error`, `invalid_input`)
-- `AA` (27) = Toutes les pages consultees, au format JSON
-- `AB` (28) = Source de l'email
-- `AC` (29) = Source du telephone
-- `AD` (30) = Source du site web
-- `AE` (31) = Source de la preuve d'identite
-- `AF` (32) = Type de rapprochement (`siret`, `name_and_address`, `name_and_city`, `none`)
-- `AG` (33) = Horodatage UTC de la recherche
-- `AH` (34) = Nom du deploiement Foundry demande
-- `AI` (35) = Snapshot du modele retourne par Azure
-- `AJ` (36) = Identifiant de reponse Azure
-- `AK` (37) = Tokens d'entree
-- `AL` (38) = Tokens de sortie
-- `AM` (39) = Total de tokens
-- `AN` (40) = Nombre d'appels de recherche web
-- `AO` (41) = Pages lues par l'extracteur deterministe
-- `AP` (42) = Nombre de champs completes sans nouvel appel au modele
-- `AQ` (43) = Methode d'extraction de l'email
-- `AR` (44) = Methode d'extraction du telephone
-- `AS` (45) = Methode de verification d'identite
-- `AT` (46) = Presence d'un pop-up de mentions legales dynamique
-
-Les colonnes `AA:AT` ne sont creees et renseignees que lorsque l'audit est active.
-
-Les entetes sont en ligne 1 et les donnees commencent en ligne 2.
+Les colonnes de resultat existantes (`Email`, `Telephone`, `Site Web`, `Enrichment Status`) sont
+reutilisees quel que soit leur emplacement. Celles qui manquent sont ajoutees apres la derniere
+colonne existante, sans ecraser les donnees metier. Il en va de meme pour les colonnes de preuve et
+de metadonnees lorsque l'audit est active.
 
 ## Lancement
 
 Commande standard :
 
 ```bash
-python -m app.main
+poetry run python -m app.main
 ```
 
 Exemples avec surcharge CLI :
 
 ```bash
-python -m app.main --file data/20ksocietes.xlsx --sheet "Etablissements actifs (tous)"
-python -m app.main --max-rows 10 --batch-size 5
-python -m app.main --start-row 2 --max-rows 50 --batch-size 10
-python -m app.main --start-row 12 --max-rows 100 --batch-size 20 --workers 4 --audit
-python -m app.main --search-context-size low --audit
-python -m app.main --site-extraction
-python -m app.main --no-site-extraction
-python -m app.main --no-audit --workers 1
-python -m app.main --overwrite-existing
-python -m app.main --no-skip-if-filled
+poetry run python -m app.main --file data/20ksocietes.xlsx --sheet "Etablissements actifs (tous)"
+poetry run python -m app.main --file data/full_data_prospect_sample_100_resolved_enrichis.xlsx --sheet V2
+poetry run python -m app.main --max-rows 10 --batch-size 5
+poetry run python -m app.main --start-row 2 --max-rows 50 --batch-size 10
+poetry run python -m app.main --start-row 12 --max-rows 100 --batch-size 20 --workers 4 --audit
+poetry run python -m app.main --search-context-size low --audit
+poetry run python -m app.main --site-extraction
+poetry run python -m app.main --no-site-extraction
+poetry run python -m app.main --no-audit --workers 1
+poetry run python -m app.main --overwrite-existing
+poetry run python -m app.main --no-skip-if-filled
 ```
 
 ## Fonctionnement
