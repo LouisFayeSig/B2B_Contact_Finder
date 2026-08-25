@@ -67,6 +67,7 @@ def make_config(*, overwrite_existing: bool = False) -> AppConfig:
         azure_foundry_ca_bundle=None,
         log_file_path=Path("unused.log"),
         journal_file_path=Path("unused.pending.jsonl"),
+        invalid_response_file_path=Path("unused.invalid.jsonl"),
     )
 
 

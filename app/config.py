@@ -37,6 +37,7 @@ class AppConfig:
     azure_foundry_ca_bundle: Path | None
     log_file_path: Path
     journal_file_path: Path
+    invalid_response_file_path: Path
     site_extraction_enabled: bool = True
     site_extraction_max_pages: int = 6
     site_extraction_timeout: float = 12.0
@@ -77,6 +78,12 @@ class AppConfig:
                 os.getenv(
                     "PROCESSING_JOURNAL_PATH",
                     "logs/enrichment.pending.jsonl",
+                )
+            ).expanduser(),
+            invalid_response_file_path=Path(
+                os.getenv(
+                    "INVALID_RESPONSE_PATH",
+                    "logs/invalid_foundry_responses.jsonl",
                 )
             ).expanduser(),
             site_extraction_enabled=parse_bool(os.getenv("SITE_EXTRACTION_ENABLED"), default=True),

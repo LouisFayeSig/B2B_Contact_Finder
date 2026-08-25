@@ -33,7 +33,8 @@ class ExcelColumnResolutionTests(unittest.TestCase):
         self.assertEqual(columns.email, 10)
         self.assertEqual(columns.phone, 11)
         self.assertEqual(columns.website, 12)
-        self.assertEqual(columns.status, 13)
+        self.assertEqual(columns.website_type, 13)
+        self.assertEqual(columns.status, 14)
 
     def test_existing_result_columns_are_reused_regardless_of_order(self) -> None:
         sheet = Workbook().active

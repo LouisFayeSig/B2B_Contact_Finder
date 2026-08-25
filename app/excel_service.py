@@ -122,11 +122,16 @@ class ExcelService:
             (self.columns.phone, result.phone, self.columns.phone_source, result.phone_source),
             (self.columns.website, result.website, self.columns.website_source, result.website_source),
         )
+        website_was_written = False
+        website_matches_existing = False
         for column_index, value, source_column, source in result_values:
             existing = self._read_text(row_index, column_index)
             value_was_written = overwrite_existing or not existing or existing == NOT_FOUND_LABEL
             if value_was_written:
                 self.sheet.cell(row=row_index, column=column_index, value=value)
+            if column_index == self.columns.website:
+                website_was_written = value_was_written
+                website_matches_existing = self._contact_values_match(column_index, existing, value)
             if self.audit_enabled and (value_was_written or self._contact_values_match(column_index, existing, value)):
                 self._write_audit_value(
                     row_index,
@@ -134,6 +139,14 @@ class ExcelService:
                     source,
                     overwrite_existing=overwrite_existing,
                 )
+
+        existing_website_type = self._read_text(row_index, self.columns.website_type)
+        if website_was_written or (website_matches_existing and not existing_website_type):
+            self.sheet.cell(
+                row=row_index,
+                column=self.columns.website_type,
+                value=result.website_type.value,
+            )
 
         if not self.audit_enabled:
             return
@@ -218,6 +231,7 @@ class ExcelService:
             self.columns.email: "Email",
             self.columns.phone: "Telephone",
             self.columns.website: "Site Web",
+            self.columns.website_type: "Site Web Type",
             self.columns.status: "Enrichment Status",
         }
         if self.audit_enabled:

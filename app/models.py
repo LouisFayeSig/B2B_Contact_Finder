@@ -48,6 +48,19 @@ class IdentityMatchType(StrEnum):
     NONE = "none"
 
 
+class WebsiteType(StrEnum):
+    """Nature de la page conservee dans la colonne Site Web."""
+
+    OFFICIAL_SITE = "official_site"
+    GOOGLE_MAPS = "google_maps"
+    DIRECTORY = "directory"
+    SOCIAL_NETWORK = "social_network"
+    MARKETPLACE = "marketplace"
+    OTHER = "other"
+    UNKNOWN = "unknown"
+    NOT_FOUND = "not_found"
+
+
 class CompanyRow(BaseModel):
     """Representation d'une ligne entreprise lue depuis Excel."""
 
@@ -77,6 +90,7 @@ class CompanyResult(BaseModel):
     email: str = Field(default=NOT_FOUND_LABEL)
     phone: str = Field(default=NOT_FOUND_LABEL)
     website: str = Field(default=NOT_FOUND_LABEL)
+    website_type: WebsiteType = WebsiteType.UNKNOWN
     sources: list[str] = Field(default_factory=list, max_length=30)
     email_source: str = Field(default=NOT_FOUND_LABEL)
     phone_source: str = Field(default=NOT_FOUND_LABEL)
@@ -168,6 +182,7 @@ class CompanyResult(BaseModel):
             self.email = NOT_FOUND_LABEL
             self.phone = NOT_FOUND_LABEL
             self.website = NOT_FOUND_LABEL
+            self.website_type = WebsiteType.NOT_FOUND
             self.email_source = NOT_FOUND_LABEL
             self.phone_source = NOT_FOUND_LABEL
             self.website_source = NOT_FOUND_LABEL
@@ -184,6 +199,10 @@ class CompanyResult(BaseModel):
                 method_field = f"{value_field}_extraction_method"
                 if hasattr(self, method_field):
                     setattr(self, method_field, "")
+        if self.website == NOT_FOUND_LABEL:
+            self.website_type = WebsiteType.NOT_FOUND
+        elif self.website_type is WebsiteType.NOT_FOUND:
+            self.website_type = WebsiteType.UNKNOWN
         return self
 
     @property

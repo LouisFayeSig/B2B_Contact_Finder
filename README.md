@@ -40,10 +40,16 @@ acceptees, par exemple `siret`, `numero_siret`, `RAISON SOCIALE`, `denomination_
 `nom_entreprise`. `Adresse`, `Code postal` et `Ville` sont facultatifs et disposent egalement
 d'alias (`adresse_officielle`, `CP`, `commune`, etc.).
 
-Les colonnes de resultat existantes (`Email`, `Telephone`, `Site Web`, `Enrichment Status`) sont
+Les colonnes de resultat existantes (`Email`, `Telephone`, `Site Web`, `Site Web Type`,
+`Enrichment Status`) sont
 reutilisees quel que soit leur emplacement. Celles qui manquent sont ajoutees apres la derniere
 colonne existante, sans ecraser les donnees metier. Il en va de meme pour les colonnes de preuve et
 de metadonnees lorsque l'audit est active.
+
+`Site Web Type` qualifie l'URL retenue sans modifier sa selection : `official_site`, `google_maps`,
+`directory`, `social_network`, `marketplace`, `other` ou `not_found`. Lorsque la position qui suit
+`Site Web` est deja occupee, cette nouvelle colonne est ajoutee en fin de feuille afin de ne pas
+deplacer les donnees existantes.
 
 ## Lancement
 
@@ -77,7 +83,8 @@ poetry run python -m app.main --no-skip-if-filled
 4. Limitation eventuelle a `MAX_ROWS` pour un POC ou un traitement partiel.
 5. Application des regles de statut, `OVERWRITE_EXISTING` puis `SKIP_IF_FILLED`.
 6. Recherches web en parallele via la Responses API du deploiement Microsoft Foundry, dans la limite de `MAX_WORKERS`.
-7. Verification de l'identite, parsing JSON et validation des coordonnees.
+7. Verification de l'identite, parsing JSON et validation des coordonnees. Une reponse invalide est
+   sauvegardee dans `INVALID_RESPONSE_PATH`, puis une unique nouvelle generation est tentee.
 8. Si un email ou telephone manque mais qu'un site ou profil a ete trouve, lecture directe de la page puis, si necessaire, des liens contact et mentions legales du meme domaine.
 9. Lorsque l'audit est active, controle que chaque preuve cite une page reellement consultee.
 10. Ecriture sequentielle et non destructive dans Excel, avec journalisation durable avant chaque modification.
@@ -91,7 +98,7 @@ poetry run python -m app.main --no-skip-if-filled
 - Un nom seul, generique ou homonyme, n'est jamais une preuve suffisante.
 - Si l'identite n'est pas verifiee, toutes les coordonnees sont forcees a `Non trouve`.
 - En mode audit, une preuve qui ne figure pas parmi les pages effectivement consultees est rejetee.
-- Si l'appel API ou le parsing echoue, son statut devient `technical_error`, les coordonnees existantes restent intactes et la ligne sera retentee au prochain lancement.
+- Si la seconde reponse ne peut toujours pas etre exploitee, son statut devient `technical_error`, les coordonnees existantes restent intactes et la ligne sera retentee au prochain lancement.
 - Un resultat valide mais vide devient `not_found`.
 - Les emails, telephones et URL invalides sont normalises en `Non trouvé` avant ecriture.
 - Sans `OVERWRITE_EXISTING`, seules les cellules vides ou egales a `Non trouvé` sont completees ; les contacts existants sont preserves.
@@ -184,6 +191,8 @@ Le code reste prudent :
 - fallback vers l'analyse du payload brut
 - tentative de `json.loads`
 - extraction du premier bloc JSON si le modele renvoie du texte parasite
+- sauvegarde de la reponse complete et de son payload dans `logs/invalid_foundry_responses.jsonl`
+- une unique nouvelle generation avec une limite de sortie augmentee
 - statut `technical_error` si la reponse reste inexploitable, afin de permettre une reprise
 
 Lorsque l'audit est desactive, les citations de navigation ne sont ni extraites ni ecrites dans Excel. Il peut etre active ponctuellement avec `--audit`, sans modifier `.env`. L'outil de recherche web reste necessaire au fonctionnement metier.

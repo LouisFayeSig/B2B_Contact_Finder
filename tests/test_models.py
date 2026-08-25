@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.models import NOT_FOUND_LABEL, CompanyResult
+from app.models import NOT_FOUND_LABEL, CompanyResult, WebsiteType
 
 
 class CompanyResultTests(unittest.TestCase):
@@ -11,6 +11,7 @@ class CompanyResultTests(unittest.TestCase):
             email="contact@example.com",
             phone="+33 1 23 45 67 89",
             website="example.com/contact",
+            website_type="official_site",
             identity_verified=True,
             identity_match_type="siret",
         )
@@ -18,6 +19,7 @@ class CompanyResultTests(unittest.TestCase):
         self.assertEqual(result.email, "contact@example.com")
         self.assertEqual(result.phone, "01 23 45 67 89")
         self.assertEqual(result.website, "https://example.com/contact")
+        self.assertEqual(result.website_type, WebsiteType.OFFICIAL_SITE)
         self.assertFalse(result.is_not_found)
 
     def test_invalid_contacts_are_rejected(self) -> None:
@@ -30,6 +32,7 @@ class CompanyResultTests(unittest.TestCase):
         self.assertEqual(result.email, NOT_FOUND_LABEL)
         self.assertEqual(result.phone, NOT_FOUND_LABEL)
         self.assertEqual(result.website, NOT_FOUND_LABEL)
+        self.assertEqual(result.website_type, WebsiteType.NOT_FOUND)
         self.assertTrue(result.is_not_found)
 
     def test_sources_are_validated_deduplicated_and_limited(self) -> None:
@@ -58,6 +61,7 @@ class CompanyResultTests(unittest.TestCase):
         )
 
         self.assertTrue(result.is_not_found)
+        self.assertEqual(result.website_type, WebsiteType.NOT_FOUND)
 
 
 if __name__ == "__main__":

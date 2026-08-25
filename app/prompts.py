@@ -27,6 +27,8 @@ Succes signifie :
 - confirmer l'identite par le SIRET exact, ou par le nom avec l'adresse ou la ville ;
 - rechercher les trois coordonnees, sans s'arreter apres la premiere information trouvee ;
 - choisir la source la plus pertinente : site officiel, Google Maps, annuaire, annonce ou profil professionnel ;
+- qualifier l'URL choisie sans en changer la selection : official_site, google_maps, directory,
+  social_network, marketplace ou other ;
 - si un site est trouve, inspecter aussi son en-tete, son pied de page, sa page contact et ses mentions legales ;
 - utiliser un SIRET ou SIREN concordant dans les mentions legales comme preuve forte d'identite ;
 - citer pour chaque valeur l'URL exacte qui l'affiche.
@@ -45,6 +47,7 @@ Format JSON exact :
   "email": "valeur ou Non trouvé",
   "phone": "valeur ou Non trouvé",
   "website": "valeur ou Non trouvé",
+  "website_type": "official_site, google_maps, directory, social_network, marketplace, other ou not_found",
   "email_source": "URL exacte ou Non trouvé",
   "phone_source": "URL exacte ou Non trouvé",
   "website_source": "URL exacte ou Non trouvé",

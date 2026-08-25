@@ -9,7 +9,7 @@ from openpyxl import Workbook
 
 from app.excel_columns import resolve_excel_columns
 from app.excel_service import ExcelService
-from app.models import NOT_FOUND_LABEL, CompanyResult, ProcessingStatus
+from app.models import NOT_FOUND_LABEL, CompanyResult, ProcessingStatus, WebsiteType
 
 
 class ExcelServiceTests(unittest.TestCase):
@@ -110,6 +110,28 @@ class ExcelServiceTests(unittest.TestCase):
         self.assertEqual(self.service.sheet.cell(row=1, column=25).value, "Commentaire")
         self.assertEqual(self.service.sheet.cell(row=1, column=26).value, "Enrichment Status")
         self.assertEqual(self.service.sheet.cell(row=1, column=27).value, "Enrichment Sources")
+        self.assertEqual(self.service.sheet.cell(row=1, column=47).value, "Site Web Type")
+
+    def test_website_type_is_written_without_changing_selected_website(self) -> None:
+        result = CompanyResult(
+            website="https://www.societe.com/entreprise-test",
+            website_type="directory",
+            website_source="https://www.societe.com/entreprise-test",
+            identity_verified=True,
+            identity_match_type="siret",
+            identity_source="https://www.societe.com/entreprise-test",
+        )
+
+        self.service.write_result(2, result)
+
+        self.assertEqual(
+            self.service.sheet.cell(row=2, column=self.service.columns.website).value,
+            "https://www.societe.com/entreprise-test",
+        )
+        self.assertEqual(
+            self.service.sheet.cell(row=2, column=self.service.columns.website_type).value,
+            WebsiteType.DIRECTORY.value,
+        )
 
     def test_sources_are_not_written_when_audit_is_disabled(self) -> None:
         self.service.audit_enabled = False

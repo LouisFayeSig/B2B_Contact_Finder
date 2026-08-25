@@ -16,6 +16,7 @@ from tenacity import (
 )
 
 from app.config import AppConfig
+from app.invalid_response_journal import InvalidResponseJournal
 from app.models import NOT_FOUND_LABEL, CompanyResult, CompanyRow
 from app.prompts import SYSTEM_PROMPT, build_company_search_prompt
 from app.site_extractor import DeterministicSiteExtractor
@@ -39,6 +40,18 @@ RESULT_JSON_SCHEMA: dict[str, Any] = {
         "email": {"type": "string"},
         "phone": {"type": "string"},
         "website": {"type": "string"},
+        "website_type": {
+            "type": "string",
+            "enum": [
+                "official_site",
+                "google_maps",
+                "directory",
+                "social_network",
+                "marketplace",
+                "other",
+                "not_found",
+            ],
+        },
         "email_source": {"type": "string"},
         "phone_source": {"type": "string"},
         "website_source": {"type": "string"},
@@ -53,6 +66,7 @@ RESULT_JSON_SCHEMA: dict[str, Any] = {
         "email",
         "phone",
         "website",
+        "website_type",
         "email_source",
         "phone_source",
         "website_source",
@@ -79,20 +93,10 @@ class AzureFoundryWebSearchService:
         self._logger = logger
         self._client = self._build_client()
         self._site_extractor = site_extractor or DeterministicSiteExtractor(config, logger)
+        self._invalid_response_journal = InvalidResponseJournal(config.invalid_response_file_path, logger)
 
     def search_company_contact(self, company: CompanyRow) -> CompanyResult:
-        response = self._request_with_token_retry(company)
-
-        response_text = self._extract_text_response(response)
-        if not response_text:
-            self._logger.warning(
-                "Reponse vide ou non exploitable pour la ligne %s (%s).",
-                company.row_index,
-                company.company_name,
-            )
-            raise ModelResponseError("Réponse Azure Foundry vide ou non exploitable.")
-
-        result = self._parse_json_response(response_text)
+        response, result, attempted_responses = self._request_valid_result(company)
         sources = self._extract_web_search_sources(response) if self._config.search_audit_enabled else []
         result = self._attach_sources(result, sources)
         result = self._mark_llm_extraction_methods(result)
@@ -113,7 +117,7 @@ class AzureFoundryWebSearchService:
         response_payload = self._to_plain_data(response)
         response_id = self._read_response_string(response_payload, "id")
         model_snapshot = self._read_response_string(response_payload, "model")
-        usage = self._extract_usage(response_payload)
+        usage = self._aggregate_usage(attempted_responses)
         return sanitize_result(
             {
                 **result.model_dump(),
@@ -123,12 +127,51 @@ class AzureFoundryWebSearchService:
                 "model_snapshot": model_snapshot,
                 "response_id": response_id,
                 **usage,
-                "web_search_calls": self._count_web_search_calls(response_payload),
+                "web_search_calls": sum(
+                    self._count_web_search_calls(self._to_plain_data(attempted_response))
+                    for attempted_response in attempted_responses
+                ),
             }
         )
 
-    def _request_with_token_retry(self, company: CompanyRow) -> Any:
-        request_payload = self._build_request(company, max_output_tokens=DEFAULT_MAX_OUTPUT_TOKENS)
+    def _request_valid_result(self, company: CompanyRow) -> tuple[Any, CompanyResult, list[Any]]:
+        attempted_responses: list[Any] = []
+        for attempt in (1, 2):
+            response = self._request_with_token_retry(
+                company,
+                max_output_tokens=(DEFAULT_MAX_OUTPUT_TOKENS if attempt == 1 else RETRY_MAX_OUTPUT_TOKENS),
+            )
+            attempted_responses.append(response)
+            response_text = self._extract_text_response(response)
+            try:
+                if not response_text:
+                    raise ModelResponseError("Reponse Azure Foundry vide ou non exploitable.")
+                return response, self._parse_json_response(response_text), attempted_responses
+            except ModelResponseError as exc:
+                self._invalid_response_journal.append(
+                    company,
+                    self._to_plain_data(response),
+                    response_text,
+                    exc,
+                    attempt=attempt,
+                )
+                if attempt == 1:
+                    self._logger.warning(
+                        "Ligne %s (%s) : reponse Foundry invalide sauvegardee, nouvelle tentative.",
+                        company.row_index,
+                        company.company_name,
+                    )
+                    continue
+                raise
+        raise RuntimeError("Echec inattendu de validation de la reponse Foundry.")
+
+    def _request_with_token_retry(
+        self,
+        company: CompanyRow,
+        *,
+        max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
+    ) -> Any:
+        request_payload = self._build_request(company, max_output_tokens=max_output_tokens)
 
         try:
             response = self._perform_request(request_payload)
@@ -142,7 +185,7 @@ class AzureFoundryWebSearchService:
             )
             expanded_payload = self._build_request(
                 company,
-                max_output_tokens=RETRY_MAX_OUTPUT_TOKENS,
+                max_output_tokens=max(RETRY_MAX_OUTPUT_TOKENS, max_output_tokens * 2),
             )
             return self._perform_request(expanded_payload)
         except Exception:
@@ -398,6 +441,14 @@ class AzureFoundryWebSearchService:
             "output_tokens": output_tokens,
             "total_tokens": total_tokens,
         }
+
+    def _aggregate_usage(self, responses: list[Any]) -> dict[str, int]:
+        total = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        for response in responses:
+            usage = self._extract_usage(self._to_plain_data(response))
+            for key in total:
+                total[key] += usage[key]
+        return total
 
     def _count_web_search_calls(self, payload: Any) -> int:
         if not isinstance(payload, Mapping):

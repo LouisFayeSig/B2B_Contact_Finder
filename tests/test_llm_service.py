@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from app.llm_service import AzureFoundryWebSearchService, ModelResponseError
 from app.models import CompanyResult, CompanyRow
@@ -37,6 +37,7 @@ class AzureFoundryWebSearchServiceTests(unittest.TestCase):
         self.assertIn("Entreprise Test", request["input"])
         self.assertIn("instructions", request)
         self.assertNotIn("temperature", request)
+        self.assertIn("website_type", request["text"]["format"]["schema"]["required"])
 
     def test_request_omits_audit_payload_when_audit_is_disabled(self) -> None:
         self.service._config.search_audit_enabled = False
@@ -156,6 +157,60 @@ class AzureFoundryWebSearchServiceTests(unittest.TestCase):
     def test_invalid_json_raises_recoverable_processing_error(self) -> None:
         with self.assertRaises(ModelResponseError):
             self.service._parse_json_response("pas du json")
+
+    def test_invalid_json_is_saved_then_retried_once(self) -> None:
+        invalid_response = {
+            "id": "resp_bad",
+            "output_text": "pas du json",
+            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+        }
+        valid_response = {
+            "id": "resp_ok",
+            "usage": {"input_tokens": 110, "output_tokens": 30, "total_tokens": 140},
+            "output_text": (
+                '{"email":"Non trouvé","phone":"Non trouvé","website":"Non trouvé",'
+                '"website_type":"not_found","email_source":"Non trouvé",'
+                '"phone_source":"Non trouvé","website_source":"Non trouvé",'
+                '"identity_verified":false,"identity_match_type":"none",'
+                '"identity_source":"Non trouvé"}'
+            ),
+        }
+        self.service._invalid_response_journal = Mock()
+
+        with patch.object(
+            self.service,
+            "_request_with_token_retry",
+            side_effect=[invalid_response, valid_response],
+        ) as request:
+            response, result, attempted_responses = self.service._request_valid_result(self.company)
+
+        self.assertEqual(response["id"], "resp_ok")
+        self.assertTrue(result.is_not_found)
+        self.assertEqual(len(attempted_responses), 2)
+        self.assertEqual(
+            self.service._aggregate_usage(attempted_responses),
+            {"input_tokens": 210, "output_tokens": 50, "total_tokens": 260},
+        )
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(request.call_args_list[0].kwargs["max_output_tokens"], 600)
+        self.assertEqual(request.call_args_list[1].kwargs["max_output_tokens"], 1200)
+        self.service._invalid_response_journal.append.assert_called_once()
+
+    def test_second_invalid_json_is_saved_then_raised(self) -> None:
+        self.service._invalid_response_journal = Mock()
+        invalid_response = {"output_text": "toujours invalide"}
+
+        with (
+            patch.object(
+                self.service,
+                "_request_with_token_retry",
+                side_effect=[invalid_response, invalid_response],
+            ),
+            self.assertRaises(ModelResponseError),
+        ):
+            self.service._request_valid_result(self.company)
+
+        self.assertEqual(self.service._invalid_response_journal.append.call_count, 2)
 
     def test_audit_rejects_contact_with_unconsulted_evidence(self) -> None:
         result = CompanyResult(

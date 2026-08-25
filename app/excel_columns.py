@@ -21,6 +21,7 @@ class ExcelColumns:
     email: int
     phone: int
     website: int
+    website_type: int
     status: int
     sources: int
     email_source: int
@@ -55,6 +56,7 @@ class ExcelColumns:
             email=16,
             phone=17,
             website=18,
+            website_type=47,
             status=26,
             sources=27,
             email_source=28,
@@ -106,6 +108,7 @@ OUTPUT_ALIASES: dict[str, tuple[str, ...]] = {
     "email": ("email", "e mail", "mail", "adresse email", "email societe"),
     "phone": ("telephone", "tel", "numero telephone"),
     "website": ("site web", "site internet", "website", "url site web"),
+    "website_type": ("site web type", "website type", "type site web", "nature site web"),
     "status": ("enrichment status", "statut enrichissement"),
     "sources": ("enrichment sources", "sources enrichissement"),
     "email_source": ("email source", "source email"),
